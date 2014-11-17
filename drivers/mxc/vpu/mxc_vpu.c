@@ -1,5 +1,5 @@
 /*
- * Copyright 2006-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2006-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -39,6 +39,7 @@
 #include <linux/workqueue.h>
 #include <linux/sched.h>
 #include <linux/vmalloc.h>
+#include <linux/regulator/consumer.h>
 #include <linux/page-flags.h>
 #include <linux/mm_types.h>
 #include <linux/types.h>
@@ -110,6 +111,8 @@ static int vpu_jpu_irq;
 #endif
 
 static unsigned int regBk[64];
+static struct regulator *vpu_regulator;
+static unsigned int pc_before_suspend;
 
 #define	READ_REG(x)		__raw_readl(vpu_base + x)
 #define	WRITE_REG(val, x)	__raw_writel(val, vpu_base + x)
@@ -245,8 +248,21 @@ bool vpu_is_valid_phy_memory(u32 paddr)
  */
 static int vpu_open(struct inode *inode, struct file *filp)
 {
+
 	mutex_lock(&vpu_data.lock);
-	open_count++;
+
+	if (open_count++ == 0) {
+		if (!IS_ERR(vpu_regulator))
+			regulator_enable(vpu_regulator);
+
+#ifdef CONFIG_SOC_IMX6Q
+		clk_enable(vpu_clk);
+		if (READ_REG(BIT_CUR_PC))
+			pr_debug("Not power off before vpu open!\n");
+		clk_disable(vpu_clk);
+#endif
+	}
+
 	filp->private_data = (void *)(&vpu_data);
 	mutex_unlock(&vpu_data.lock);
 	return 0;
@@ -512,6 +528,20 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
 		}
 		break;
 	}
+	case VPU_IOC_LOCK_DEV:
+		{
+			u32 lock_en;
+
+			if (get_user(lock_en, (u32 __user *) arg))
+				return -EFAULT;
+
+			if (lock_en)
+				mutex_lock(&vpu_data.lock);
+			else
+				mutex_unlock(&vpu_data.lock);
+
+			break;
+		}
 	default:
 		{
 			printk(KERN_ERR "No such IOCTL, cmd is %d\n", cmd);
@@ -528,9 +558,70 @@ static long vpu_ioctl(struct file *filp, u_int cmd,
  */
 static int vpu_release(struct inode *inode, struct file *filp)
 {
+	int i;
+	unsigned long timeout;
 
 	mutex_lock(&vpu_data.lock);
+
 	if (open_count > 0 && !(--open_count)) {
+
+		/* Wait for vpu go to idle state */
+		clk_enable(vpu_clk);
+		if (READ_REG(BIT_CUR_PC)) {
+
+			timeout = jiffies + HZ;
+			while (READ_REG(BIT_BUSY_FLAG)) {
+				msleep(1);
+				if (time_after(jiffies, timeout)) {
+					printk(KERN_WARNING "VPU timeout during release\n");
+					break;
+				}
+			}
+			clk_disable(vpu_clk);
+
+			/* Clean up interrupt */
+			cancel_work_sync(&vpu_data.work);
+			flush_workqueue(vpu_data.workqueue);
+			irq_status = 0;
+
+			clk_enable(vpu_clk);
+			if (READ_REG(BIT_BUSY_FLAG)) {
+
+				if (cpu_is_mx51() || cpu_is_mx53()) {
+					printk(KERN_ERR
+						"fatal error: can't gate/power off when VPU is busy\n");
+					clk_disable(vpu_clk);
+					mutex_unlock(&vpu_data.lock);
+					return -EFAULT;
+				}
+
+#ifdef CONFIG_SOC_IMX6Q
+				if (cpu_is_mx6dl() || cpu_is_mx6q()) {
+					WRITE_REG(0x11, 0x10F0);
+					timeout = jiffies + HZ;
+					while (READ_REG(0x10F4) != 0x77) {
+						msleep(1);
+						if (time_after(jiffies, timeout))
+							break;
+					}
+
+					if (READ_REG(0x10F4) != 0x77) {
+						printk(KERN_ERR
+							"fatal error: can't gate/power off when VPU is busy\n");
+						WRITE_REG(0x0, 0x10F0);
+						clk_disable(vpu_clk);
+						mutex_unlock(&vpu_data.lock);
+						return -EFAULT;
+					} else {
+						if (vpu_plat->reset)
+							vpu_plat->reset();
+					}
+				}
+#endif
+			}
+		}
+		clk_disable(vpu_clk);
+
 		vpu_free_buffers();
 
 		/* Free shared memory when vpu device is idle */
@@ -538,6 +629,14 @@ static int vpu_release(struct inode *inode, struct file *filp)
 		share_mem.cpu_addr = 0;
 		vfree((void *)vshare_mem.cpu_addr);
 		vshare_mem.cpu_addr = 0;
+
+		vpu_clk_usercount = clk_get_usecount(vpu_clk);
+		for (i = 0; i < vpu_clk_usercount; i++)
+			clk_disable(vpu_clk);
+
+		if (!IS_ERR(vpu_regulator))
+			regulator_disable(vpu_regulator);
+
 	}
 	mutex_unlock(&vpu_data.lock);
 
@@ -705,6 +804,19 @@ static int vpu_dev_probe(struct platform_device *pdev)
 			  (void *)(&vpu_data));
 	if (err)
 		goto err_out_class;
+	vpu_regulator = regulator_get(NULL, "cpu_vddvpu");
+	if (IS_ERR(vpu_regulator)) {
+		if (!(cpu_is_mx51() || cpu_is_mx53())) {
+			printk(KERN_ERR
+				"%s: failed to get vpu regulator\n", __func__);
+			goto err_out_class;
+		} else {
+			/* regulator_get will return error on MX5x,
+			 * just igore it everywhere*/
+			printk(KERN_WARNING
+				"%s: failed to get vpu regulator\n", __func__);
+		}
+	}
 
 #ifdef MXC_VPU_HAS_JPU
 	vpu_jpu_irq = platform_get_irq_byname(pdev, "vpu_jpu_irq");
@@ -752,7 +864,8 @@ static int vpu_dev_remove(struct platform_device *pdev)
 	iounmap(vpu_base);
 	if (vpu_plat && vpu_plat->iram_enable && vpu_plat->iram_size)
 		iram_free(iram.start,  vpu_plat->iram_size);
-
+	if (!IS_ERR(vpu_regulator))
+		regulator_put(vpu_regulator);
 	return 0;
 }
 
@@ -762,114 +875,154 @@ static int vpu_suspend(struct platform_device *pdev, pm_message_t state)
 	int i;
 	unsigned long timeout;
 
-	/* Wait for vpu go to idle state, suspect vpu cannot be changed
-	   to idle state after about 1 sec */
-	if (open_count > 0) {
+	mutex_lock(&vpu_data.lock);
+	if (open_count == 0) {
+		/* VPU is released (all instances are freed),
+		 * clock is already off, context is no longer needed,
+		 * power is already off on MX6,
+		 * gate power on MX51 */
+		if (cpu_is_mx51()) {
+			if (vpu_plat->pg)
+				vpu_plat->pg(1);
+		}
+	} else {
+		/* Wait for vpu go to idle state, suspect vpu cannot be changed
+		   to idle state after about 1 sec */
 		timeout = jiffies + HZ;
 		clk_enable(vpu_clk);
 		while (READ_REG(BIT_BUSY_FLAG)) {
 			msleep(1);
-			if (time_after(jiffies, timeout))
-				goto out;
+			if (time_after(jiffies, timeout)) {
+				clk_disable(vpu_clk);
+				mutex_unlock(&vpu_data.lock);
+				return -EAGAIN;
+			}
 		}
 		clk_disable(vpu_clk);
+
+		/* Make sure clock is disabled before suspend */
+		vpu_clk_usercount = clk_get_usecount(vpu_clk);
+		for (i = 0; i < vpu_clk_usercount; i++)
+			clk_disable(vpu_clk);
+
+		if (cpu_is_mx53()) {
+			mutex_unlock(&vpu_data.lock);
+			return 0;
+		}
+
+		if (bitwork_mem.cpu_addr != 0) {
+			clk_enable(vpu_clk);
+			/* Save 64 registers from BIT_CODE_BUF_ADDR */
+			for (i = 0; i < 64; i++)
+				regBk[i] = READ_REG(BIT_CODE_BUF_ADDR + (i * 4));
+			pc_before_suspend = READ_REG(BIT_CUR_PC);
+			clk_disable(vpu_clk);
+		}
+
+		if (vpu_plat->pg)
+			vpu_plat->pg(1);
+
+		/* If VPU is working before suspend, disable
+		 * regulator to make usecount right. */
+		if (!IS_ERR(vpu_regulator))
+			regulator_disable(vpu_regulator);
 	}
 
-	/* Make sure clock is disabled before suspend */
-	vpu_clk_usercount = clk_get_usecount(vpu_clk);
-	for (i = 0; i < vpu_clk_usercount; i++)
-		clk_disable(vpu_clk);
-
-	if (cpu_is_mx53())
-		return 0;
-
-	if (bitwork_mem.cpu_addr != 0) {
-		clk_enable(vpu_clk);
-		/* Save 64 registers from BIT_CODE_BUF_ADDR */
-		for (i = 0; i < 64; i++)
-			regBk[i] = READ_REG(BIT_CODE_BUF_ADDR + (i * 4));
-		clk_disable(vpu_clk);
-	}
-
-	if (vpu_plat->pg)
-		vpu_plat->pg(1);
-
+	mutex_unlock(&vpu_data.lock);
 	return 0;
-
-out:
-	clk_disable(vpu_clk);
-	return -EAGAIN;
-
 }
 
 static int vpu_resume(struct platform_device *pdev)
 {
 	int i;
 
-	if (cpu_is_mx53())
-		goto recover_clk;
-
-	if (vpu_plat->pg)
-		vpu_plat->pg(0);
-
-	if (bitwork_mem.cpu_addr != 0) {
-		u32 *p = (u32 *) bitwork_mem.cpu_addr;
-		u32 data, pc;
-		u16 data_hi;
-		u16 data_lo;
-
-		clk_enable(vpu_clk);
-
-		/* reset VPU in case of voltage change */
-		if (vpu_plat->reset)
-			vpu_plat->reset();
-
-		pc = READ_REG(BIT_CUR_PC);
-		if (pc) {
-			clk_disable(vpu_clk);
+	mutex_lock(&vpu_data.lock);
+	if (open_count == 0) {
+		/* VPU is released (all instances are freed),
+		 * clock should be kept off, context is no longer needed,
+		 * power should be kept off on MX6,
+		 * disable power gating on MX51 */
+		if (cpu_is_mx51()) {
+			if (vpu_plat->pg)
+				vpu_plat->pg(0);
+		}
+	} else {
+		if (cpu_is_mx53())
 			goto recover_clk;
+
+		/* If VPU is working before suspend, enable
+		 * regulator to make usecount right. */
+		if (!IS_ERR(vpu_regulator))
+			regulator_enable(vpu_regulator);
+
+		if (vpu_plat->pg)
+			vpu_plat->pg(0);
+
+		if (bitwork_mem.cpu_addr != 0) {
+			u32 *p = (u32 *) bitwork_mem.cpu_addr;
+			u32 data, pc;
+			u16 data_hi;
+			u16 data_lo;
+
+			clk_enable(vpu_clk);
+
+			pc = READ_REG(BIT_CUR_PC);
+			if (pc) {
+				printk(KERN_WARNING "Not power off after suspend (PC=0x%x)\n", pc);
+				clk_disable(vpu_clk);
+				goto recover_clk;
+			}
+
+			/* Restore registers */
+			for (i = 0; i < 64; i++)
+				WRITE_REG(regBk[i], BIT_CODE_BUF_ADDR + (i * 4));
+
+			WRITE_REG(0x0, BIT_RESET_CTRL);
+			WRITE_REG(0x0, BIT_CODE_RUN);
+			/* MX6 RTL has a bug not to init MBC_SET_SUBBLK_EN on reset */
+#ifdef CONFIG_SOC_IMX6Q
+			WRITE_REG(0x0, MBC_SET_SUBBLK_EN);
+#endif
+
+			/*
+			 * Re-load boot code, from the codebuffer in external RAM.
+			 * Thankfully, we only need 4096 bytes, same for all platforms.
+			 */
+			for (i = 0; i < 2048; i += 4) {
+				data = p[(i / 2) + 1];
+				data_hi = (data >> 16) & 0xFFFF;
+				data_lo = data & 0xFFFF;
+				WRITE_REG((i << 16) | data_hi, BIT_CODE_DOWN);
+				WRITE_REG(((i + 1) << 16) | data_lo,
+						BIT_CODE_DOWN);
+
+				data = p[i / 2];
+				data_hi = (data >> 16) & 0xFFFF;
+				data_lo = data & 0xFFFF;
+				WRITE_REG(((i + 2) << 16) | data_hi,
+						BIT_CODE_DOWN);
+				WRITE_REG(((i + 3) << 16) | data_lo,
+						BIT_CODE_DOWN);
+			}
+
+			if (pc_before_suspend) {
+				WRITE_REG(0x1, BIT_BUSY_FLAG);
+				WRITE_REG(0x1, BIT_CODE_RUN);
+				while (READ_REG(BIT_BUSY_FLAG))
+					;
+			} else {
+				printk(KERN_WARNING "PC=0 before suspend\n");
+			}
+			clk_disable(vpu_clk);
 		}
-
-		/* Restore registers */
-		for (i = 0; i < 64; i++)
-			WRITE_REG(regBk[i], BIT_CODE_BUF_ADDR + (i * 4));
-
-		WRITE_REG(0x0, BIT_RESET_CTRL);
-		WRITE_REG(0x0, BIT_CODE_RUN);
-
-		/*
-		 * Re-load boot code, from the codebuffer in external RAM.
-		 * Thankfully, we only need 4096 bytes, same for all platforms.
-		 */
-		for (i = 0; i < 2048; i += 4) {
-			data = p[(i / 2) + 1];
-			data_hi = (data >> 16) & 0xFFFF;
-			data_lo = data & 0xFFFF;
-			WRITE_REG((i << 16) | data_hi, BIT_CODE_DOWN);
-			WRITE_REG(((i + 1) << 16) | data_lo,
-				  BIT_CODE_DOWN);
-
-			data = p[i / 2];
-			data_hi = (data >> 16) & 0xFFFF;
-			data_lo = data & 0xFFFF;
-			WRITE_REG(((i + 2) << 16) | data_hi,
-				  BIT_CODE_DOWN);
-			WRITE_REG(((i + 3) << 16) | data_lo,
-				  BIT_CODE_DOWN);
-		}
-
-		WRITE_REG(0x1, BIT_BUSY_FLAG);
-		WRITE_REG(0x1, BIT_CODE_RUN);
-		while (READ_REG(BIT_BUSY_FLAG))
-			;
-		clk_disable(vpu_clk);
-	}
 
 recover_clk:
-	/* Recover vpu clock */
-	for (i = 0; i < vpu_clk_usercount; i++)
-		clk_enable(vpu_clk);
+		/* Recover vpu clock */
+		for (i = 0; i < vpu_clk_usercount; i++)
+			clk_enable(vpu_clk);
+	}
 
+	mutex_unlock(&vpu_data.lock);
 	return 0;
 }
 #else
@@ -915,6 +1068,16 @@ static void __exit vpu_exit(void)
 	vpu_free_dma_buffer(&bitwork_mem);
 	vpu_free_dma_buffer(&pic_para_mem);
 	vpu_free_dma_buffer(&user_data_mem);
+
+	/* reset VPU state */
+	if (!IS_ERR(vpu_regulator))
+		regulator_enable(vpu_regulator);
+	clk_enable(vpu_clk);
+	if (vpu_plat->reset)
+		vpu_plat->reset();
+	clk_disable(vpu_clk);
+	if (!IS_ERR(vpu_regulator))
+		regulator_disable(vpu_regulator);
 
 	clk_put(vpu_clk);
 

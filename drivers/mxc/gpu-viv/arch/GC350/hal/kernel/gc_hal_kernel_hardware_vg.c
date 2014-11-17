@@ -1,6 +1,6 @@
 /****************************************************************************
 *
-*    Copyright (C) 2005 - 2012 by Vivante Corp.
+*    Copyright (C) 2005 - 2013 by Vivante Corp.
 *
 *    This program is free software; you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
@@ -17,8 +17,6 @@
 *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 *
 *****************************************************************************/
-
-
 
 
 #include "gc_hal.h"
@@ -219,7 +217,6 @@ _IdentifyHardware(
     return status;
 }
 
-#if gcdPOWER_MANAGEMENT
 static gctTHREADFUNCRESULT gctTHREADFUNCTYPE
 _TimeIdleThread(
     gctTHREADFUNCPARAMETER ThreadParameter
@@ -264,8 +261,6 @@ _TimeIdleThread(
     }
     return 0;
 }
-#endif
-
 
 /******************************************************************************\
 ****************************** gckVGHARDWARE API code *****************************
@@ -310,6 +305,8 @@ gckVGHARDWARE_Construct(
 
     do
     {
+        gcmkERR_BREAK(gckOS_SetGPUPower(Os, gcvCORE_VG, gcvTRUE, gcvTRUE));
+
         status = _ResetGPU(Os);
 
         if (status != gcvSTATUS_OK)
@@ -342,10 +339,10 @@ gckVGHARDWARE_Construct(
 
         hardware->powerMutex            = gcvNULL;
         hardware->idleSignal            = gcvNULL;
-        hardware->chipPowerState        = gcvPOWER_OFF;
+        hardware->chipPowerState        = gcvPOWER_ON;
         hardware->chipPowerStateGlobal  = gcvPOWER_ON;
-        hardware->clockState            = gcvFALSE;
-        hardware->powerState            = gcvFALSE;
+        hardware->clockState            = gcvTRUE;
+        hardware->powerState            = gcvTRUE;
         hardware->powerOffTimeout       = gcdPOWEROFF_TIMEOUT;
         hardware->powerOffTime          = 0;
         hardware->timeIdleThread        = gcvNULL;
@@ -362,19 +359,24 @@ gckVGHARDWARE_Construct(
         /* Set default event mask. */
         hardware->eventMask = 0xFFFFFFFF;
 
+        gcmkERR_BREAK(gckOS_AtomConstruct(Os, &hardware->pageTableDirty));
+
         /* Set fast clear to auto. */
         gcmkVERIFY_OK(gckVGHARDWARE_SetFastClear(hardware, -1));
 
         gcmkERR_BREAK(gckOS_CreateMutex(Os, &hardware->powerMutex));
         gcmkERR_BREAK(gckOS_CreateSignal(Os, gcvFALSE, &hardware->idleSignal));
-#if gcdPOWER_MANAGEMENT
+
+        /* Enable power management by default. */
+        hardware->powerManagement = gcvTRUE;
+
         gcmkERR_BREAK(gckOS_StartThread(
             hardware->os,
             _TimeIdleThread,
             hardware,
             &hardware->timeIdleThread
             ));
-#endif
+
         /* Return pointer to the gckVGHARDWARE object. */
         *Hardware = hardware;
 
@@ -384,10 +386,17 @@ gckVGHARDWARE_Construct(
     }
     while (gcvFALSE);
 
+    if (hardware->pageTableDirty != gcvNULL)
+    {
+        gcmkVERIFY_OK(gckOS_AtomDestroy(Os, hardware->pageTableDirty));
+    }
+
     if (hardware != gcvNULL)
     {
         gcmkVERIFY_OK(gckOS_Free(Os, hardware));
     }
+
+    gcmkVERIFY_OK(gckOS_SetGPUPower(Os, gcvCORE_VG, gcvFALSE, gcvFALSE));
 
     gcmkFOOTER();
     /* Return the status. */
@@ -419,11 +428,10 @@ gckVGHARDWARE_Destroy(
     /* Verify the arguments. */
     gcmkVERIFY_OBJECT(Hardware, gcvOBJ_HARDWARE);
 
-#if gcdPOWER_MANAGEMENT
     Hardware->killThread  = gcvTRUE;
     gcmkVERIFY_OK(gckOS_Signal(Hardware->os, Hardware->idleSignal, gcvTRUE));
     gcmkVERIFY_OK(gckOS_StopThread(Hardware->os, Hardware->timeIdleThread));
-#endif
+
     /* Mark the object as unknown. */
     Hardware->object.type = gcvOBJ_UNKNOWN;
 
@@ -437,6 +445,11 @@ gckVGHARDWARE_Destroy(
     {
         gcmkVERIFY_OK(gckOS_DestroySignal(
             Hardware->os, Hardware->idleSignal));
+    }
+
+    if (Hardware->pageTableDirty != gcvNULL)
+    {
+        gcmkVERIFY_OK(gckOS_AtomDestroy(Hardware->os, Hardware->pageTableDirty));
     }
 
     /* Free the object. */
@@ -1277,26 +1290,6 @@ gceSTATUS gckVGHARDWARE_FlushMMU(
             | ((((gctUINT32) (0)) & ~(((gctUINT32) (((gctUINT32) ((((1 ? 2:2) - (0 ? 2:2) + 1) == 32) ? ~0 : (~(~0 << ((1 ? 2:2) - (0 ? 2:2) + 1))))))) << (0 ? 2:2))) | (((gctUINT32) (0x1 & ((gctUINT32) ((((1 ? 2:2) - (0 ? 2:2) + 1) == 32) ? ~0 : (~(~0 << ((1 ? 2:2) - (0 ? 2:2) + 1))))))) << (0 ? 2:2)))
             | ((((gctUINT32) (0)) & ~(((gctUINT32) (((gctUINT32) ((((1 ? 3:3) - (0 ? 3:3) + 1) == 32) ? ~0 : (~(~0 << ((1 ? 3:3) - (0 ? 3:3) + 1))))))) << (0 ? 3:3))) | (((gctUINT32) (0x1 & ((gctUINT32) ((((1 ? 3:3) - (0 ? 3:3) + 1) == 32) ? ~0 : (~(~0 << ((1 ? 3:3) - (0 ? 3:3) + 1))))))) << (0 ? 3:3)))
             | ((((gctUINT32) (0)) & ~(((gctUINT32) (((gctUINT32) ((((1 ? 4:4) - (0 ? 4:4) + 1) == 32) ? ~0 : (~(~0 << ((1 ? 4:4) - (0 ? 4:4) + 1))))))) << (0 ? 4:4))) | (((gctUINT32) (0x1 & ((gctUINT32) ((((1 ? 4:4) - (0 ? 4:4) + 1) == 32) ? ~0 : (~(~0 << ((1 ? 4:4) - (0 ? 4:4) + 1))))))) << (0 ? 4:4)));
-#if gcdPOWER_MANAGEMENT
-        /* Acquire the power management semaphore. */
-        gcmkERR_BREAK(gckOS_AcquireSemaphore(Hardware->os,
-                               command->powerSemaphore));
-
-        status = gckVGCOMMAND_Execute(
-                            command,
-                            commandBuffer
-                            );
-        /* Acquire the power management semaphore. */
-        gcmkVERIFY_OK(gckOS_ReleaseSemaphore(Hardware->os,
-                               command->powerSemaphore));
-
-        gcmkERR_BREAK(status);
-#else
-        gcmkERR_BREAK(gckVGCOMMAND_Execute(
-            command,
-            commandBuffer
-            ));
-#endif
     }
     while(gcvFALSE);
 
@@ -1441,7 +1434,6 @@ gckVGHARDWARE_ReadInterrupt(
     return status;
 }
 
-#if gcdPOWER_MANAGEMENT
 static gceSTATUS _CommandStall(
     gckVGHARDWARE Hardware)
 {
@@ -1486,7 +1478,6 @@ static gceSTATUS _CommandStall(
     /* Return the status. */
     return status;
 }
-#endif
 
 /*******************************************************************************
 **
@@ -1509,7 +1500,6 @@ gckVGHARDWARE_SetPowerManagementState(
     IN gceCHIPPOWERSTATE State
     )
 {
-#if gcdPOWER_MANAGEMENT
     gceSTATUS status;
     gckVGCOMMAND command = gcvNULL;
     gckOS os;
@@ -1608,6 +1598,12 @@ gckVGHARDWARE_SetPowerManagementState(
     gcmkVERIFY_OBJECT(Hardware->kernel, gcvOBJ_KERNEL);
     command = Hardware->kernel->command;
     gcmkVERIFY_OBJECT(command, gcvOBJ_COMMAND);
+
+    if (Hardware->powerManagement == gcvFALSE)
+    {
+        gcmkFOOTER_NO();
+        return gcvSTATUS_OK;
+    }
 
     /* Start profiler. */
     gcmkPROFILE_INIT(freq, time);
@@ -1809,6 +1805,8 @@ gckVGHARDWARE_SetPowerManagementState(
 
     if (flag & gcvPOWER_FLAG_INITIALIZE)
     {
+        gcmkONERROR(gckVGHARDWARE_SetMMU(Hardware, Hardware->kernel->mmu->pageTableLogical));
+
         /* Force the command queue to reload the next context. */
         command->currentContext = 0;
     }
@@ -1921,10 +1919,6 @@ OnError:
     /* Return the status. */
     gcmkFOOTER();
     return status;
-#else /* gcdPOWER_MANAGEMENT */
-    /* Do nothing */
-    return gcvSTATUS_OK;
-#endif
 }
 
 /*******************************************************************************
@@ -1959,6 +1953,40 @@ gckVGHARDWARE_QueryPowerManagementState(
 
     /* Success. */
     gcmkFOOTER_ARG("*State=%d", *State);
+    return gcvSTATUS_OK;
+}
+
+/*******************************************************************************
+**
+**  gckVGHARDWARE_SetPowerManagement
+**
+**  Configure GPU power management function.
+**  Only used in driver initialization stage.
+**
+**  INPUT:
+**
+**      gckVGHARDWARE Harwdare
+**          Pointer to an gckHARDWARE object.
+**
+**      gctBOOL PowerManagement
+**          Power Mangement State.
+**
+*/
+gceSTATUS
+gckVGHARDWARE_SetPowerManagement(
+    IN gckVGHARDWARE Hardware,
+    IN gctBOOL PowerManagement
+    )
+{
+    gcmkHEADER_ARG("Hardware=0x%x", Hardware);
+
+    /* Verify the arguments. */
+    gcmkVERIFY_OBJECT(Hardware, gcvOBJ_HARDWARE);
+
+    Hardware->powerManagement = PowerManagement;
+
+    /* Success. */
+    gcmkFOOTER_NO();
     return gcvSTATUS_OK;
 }
 

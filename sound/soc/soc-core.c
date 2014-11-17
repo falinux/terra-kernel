@@ -5,6 +5,7 @@
  * Copyright 2005 Openedhand Ltd.
  * Copyright (C) 2010 Slimlogic Ltd.
  * Copyright (C) 2010 Texas Instruments Inc.
+ * Copyright (C) 2012 Freescale Semiconductor, Inc.
  *
  * Author: Liam Girdwood <lrg@slimlogic.co.uk>
  *         with code, comments and ideas from :-
@@ -747,6 +748,9 @@ static int soc_codec_close(struct snd_pcm_substream *substream)
 	codec_dai->active--;
 	codec->active--;
 
+	if (!cpu_dai->active && !codec_dai->active)
+		rtd->rate = 0;
+
 	/* Muting the DAC suppresses artifacts caused during digital
 	 * shutdown, for example from stopping clocks.
 	 */
@@ -983,6 +987,12 @@ static int soc_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	if (cpu_dai->driver->ops->trigger) {
 		ret = cpu_dai->driver->ops->trigger(substream, cmd, cpu_dai);
+		if (ret < 0)
+			return ret;
+	}
+
+	if (rtd->dai_link->ops && rtd->dai_link->ops->trigger) {
+		ret = rtd->dai_link->ops->trigger(substream, cmd);
 		if (ret < 0)
 			return ret;
 	}

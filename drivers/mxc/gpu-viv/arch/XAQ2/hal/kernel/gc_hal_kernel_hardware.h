@@ -1,6 +1,6 @@
 /****************************************************************************
 *
-*    Copyright (C) 2005 - 2012 by Vivante Corp.
+*    Copyright (C) 2005 - 2013 by Vivante Corp.
 *
 *    This program is free software; you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
@@ -17,8 +17,6 @@
 *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 *
 *****************************************************************************/
-
-
 
 
 #ifndef __gc_hal_kernel_hardware_h_
@@ -88,6 +86,12 @@ struct _gckHARDWARE
     /* FSCALE_VAL when gcvPOWER_ON. */
     gctUINT32                   powerOnFscaleVal;
 #endif
+
+#if gcdLINK_QUEUE_SIZE
+    struct _gckLINKQUEUE        linkQueue;
+#endif
+
+    gctBOOL                     powerManagement;
 };
 
 gceSTATUS

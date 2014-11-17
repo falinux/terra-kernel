@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2004-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -366,6 +366,7 @@ static inline int valid_mode(u32 palette)
 		(palette == V4L2_PIX_FMT_UYVY) ||
 		(palette == V4L2_PIX_FMT_YUYV) ||
 		(palette == V4L2_PIX_FMT_YUV420) ||
+		(palette == V4L2_PIX_FMT_YVU420) ||
 		(palette == V4L2_PIX_FMT_NV12));
 }
 
@@ -379,6 +380,7 @@ static inline int valid_mode(u32 palette)
 static int mxc_streamon(cam_data *cam)
 {
 	struct mxc_v4l_frame *frame;
+	unsigned long lock_flags;
 	int err = 0;
 
 	pr_debug("In MVC:mxc_streamon\n");
@@ -418,6 +420,7 @@ static int mxc_streamon(cam_data *cam)
 		}
 	}
 
+	spin_lock_irqsave(&cam->queue_int_lock, lock_flags);
 	cam->ping_pong_csi = 0;
 	cam->local_buf_num = 0;
 	if (cam->enc_update_eba) {
@@ -436,7 +439,9 @@ static int mxc_streamon(cam_data *cam)
 		frame->ipu_buf_num = cam->ping_pong_csi;
 		err |= cam->enc_update_eba(cam->ipu, frame->buffer.m.offset,
 					   &cam->ping_pong_csi);
+		spin_unlock_irqrestore(&cam->queue_int_lock, lock_flags);
 	} else {
+		spin_unlock_irqrestore(&cam->queue_int_lock, lock_flags);
 		return -EINVAL;
 	}
 
@@ -470,8 +475,13 @@ static int mxc_streamoff(cam_data *cam)
 	if (cam->capture_on == false)
 		return 0;
 
-	if (strcmp(mxc_capture_inputs[cam->current_input].name,
-			"CSI MEM") == 0) {
+	/* For both CSI--MEM and CSI--IC--MEM
+	 * 1. wait for idmac eof
+	 * 2. disable csi first
+	 * 3. disable idmac
+	 * 4. disable smfc (CSI--MEM channel)
+	 */
+	if (mxc_capture_inputs[cam->current_input].name != NULL) {
 		if (cam->enc_disable_csi) {
 			err = cam->enc_disable_csi(cam);
 			if (err != 0)
@@ -479,18 +489,6 @@ static int mxc_streamoff(cam_data *cam)
 		}
 		if (cam->enc_disable) {
 			err = cam->enc_disable(cam);
-			if (err != 0)
-				return err;
-		}
-	} else if (strcmp(mxc_capture_inputs[cam->current_input].name,
-			  "CSI IC MEM") == 0) {
-		if (cam->enc_disable) {
-			err = cam->enc_disable(cam);
-			if (err != 0)
-				return err;
-		}
-		if (cam->enc_disable_csi) {
-			err = cam->enc_disable_csi(cam);
 			if (err != 0)
 				return err;
 		}
@@ -699,14 +697,14 @@ static int stop_preview(cam_data *cam)
 {
 	int err = 0;
 
-	if (cam->vf_stop_sdc) {
-		err = cam->vf_stop_sdc(cam);
+	if (cam->vf_disable_csi) {
+		err = cam->vf_disable_csi(cam);
 		if (err != 0)
 			return err;
 	}
 
-	if (cam->vf_disable_csi) {
-		err = cam->vf_disable_csi(cam);
+	if (cam->vf_stop_sdc) {
+		err = cam->vf_stop_sdc(cam);
 		if (err != 0)
 			return err;
 	}
@@ -884,6 +882,7 @@ static int mxc_v4l2_s_fmt(cam_data *cam, struct v4l2_format *f)
 			bytesperline = f->fmt.pix.width * 2;
 			break;
 		case V4L2_PIX_FMT_YUV420:
+		case V4L2_PIX_FMT_YVU420:
 			size = f->fmt.pix.width * f->fmt.pix.height * 3 / 2;
 			bytesperline = f->fmt.pix.width;
 			break;
@@ -1149,11 +1148,7 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 	case V4L2_CID_HUE:
 		if (cam->sensor) {
 			cam->hue = c->value;
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       true, true);
 			ret = vidioc_int_s_ctrl(cam->sensor, c);
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       false, false);
 		} else {
 			pr_err("ERROR: v4l2 capture: slave not found!\n");
 			ret = -ENODEV;
@@ -1162,11 +1157,7 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 	case V4L2_CID_CONTRAST:
 		if (cam->sensor) {
 			cam->contrast = c->value;
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       true, true);
 			ret = vidioc_int_s_ctrl(cam->sensor, c);
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       false, false);
 		} else {
 			pr_err("ERROR: v4l2 capture: slave not found!\n");
 			ret = -ENODEV;
@@ -1175,11 +1166,7 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 	case V4L2_CID_BRIGHTNESS:
 		if (cam->sensor) {
 			cam->bright = c->value;
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       true, true);
 			ret = vidioc_int_s_ctrl(cam->sensor, c);
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       false, false);
 		} else {
 			pr_err("ERROR: v4l2 capture: slave not found!\n");
 			ret = -ENODEV;
@@ -1188,11 +1175,7 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 	case V4L2_CID_SATURATION:
 		if (cam->sensor) {
 			cam->saturation = c->value;
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       true, true);
 			ret = vidioc_int_s_ctrl(cam->sensor, c);
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       false, false);
 		} else {
 			pr_err("ERROR: v4l2 capture: slave not found!\n");
 			ret = -ENODEV;
@@ -1201,11 +1184,7 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 	case V4L2_CID_RED_BALANCE:
 		if (cam->sensor) {
 			cam->red = c->value;
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       true, true);
 			ret = vidioc_int_s_ctrl(cam->sensor, c);
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       false, false);
 		} else {
 			pr_err("ERROR: v4l2 capture: slave not found!\n");
 			ret = -ENODEV;
@@ -1214,11 +1193,7 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 	case V4L2_CID_BLUE_BALANCE:
 		if (cam->sensor) {
 			cam->blue = c->value;
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       true, true);
 			ret = vidioc_int_s_ctrl(cam->sensor, c);
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       false, false);
 		} else {
 			pr_err("ERROR: v4l2 capture: slave not found!\n");
 			ret = -ENODEV;
@@ -1227,11 +1202,7 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 	case V4L2_CID_EXPOSURE:
 		if (cam->sensor) {
 			cam->ae_mode = c->value;
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       true, true);
 			ret = vidioc_int_s_ctrl(cam->sensor, c);
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-					       false, false);
 		} else {
 			pr_err("ERROR: v4l2 capture: slave not found!\n");
 			ret = -ENODEV;
@@ -1249,16 +1220,26 @@ static int mxc_v4l2_s_ctrl(cam_data *cam, struct v4l2_control *c)
 				if (i != c->value) {
 					vidioc_int_dev_exit(cam->all_sensors[i]);
 					vidioc_int_s_power(cam->all_sensors[i], 0);
+					if (cam->mclk_on[cam->mclk_source]) {
+						ipu_csi_enable_mclk_if(cam->ipu,
+								CSI_MCLK_I2C,
+								cam->mclk_source,
+								false, false);
+						cam->mclk_on[cam->mclk_source] =
+									false;
+					}
 				}
 			}
 			sensor_data = cam->all_sensors[c->value]->priv;
 			if (sensor_data->io_init)
 				sensor_data->io_init();
 			cam->sensor = cam->all_sensors[c->value];
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi, true, true);
+			cam->mclk_source = sensor_data->mclk_source;
+			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C,
+					       cam->mclk_source, true, true);
+			cam->mclk_on[cam->mclk_source] = true;
 			vidioc_int_s_power(cam->sensor, 1);
 			vidioc_int_dev_init(cam->sensor);
-			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi, false, false);
 		}
 		break;
 	default:
@@ -1324,9 +1305,7 @@ static int mxc_v4l2_s_param(cam_data *cam, struct v4l2_streamparm *parm)
 			current_fps, parm_fps);
 
 	/* This will change any camera settings needed. */
-	ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi, true, true);
 	err = vidioc_int_s_parm(cam->sensor, parm);
-	ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi, false, false);
 	if (err) {
 		pr_err("%s: vidioc_int_s_parm returned an error %d\n",
 			__func__, err);
@@ -1352,19 +1331,11 @@ static int mxc_v4l2_s_param(cam_data *cam, struct v4l2_streamparm *parm)
 	csi_param.csi = cam->csi;
 	csi_param.mclk = 0;
 
-	/*This may not work on other platforms. Check when adding a new one.*/
-	/*The mclk clock was never set correclty in the ipu register*/
-	/*for now we are going to use this mclk as pixel clock*/
-	/*to set csi0_data_dest register.*/
-	/*This is a workaround which should be fixed*/
 	pr_debug("   clock_curr=mclk=%d\n", ifparm.u.bt656.clock_curr);
-	if (ifparm.u.bt656.clock_curr == 0) {
+	if (ifparm.u.bt656.clock_curr == 0)
 		csi_param.clk_mode = IPU_CSI_CLK_MODE_CCIR656_INTERLACED;
-		/*protocol bt656 use 27Mhz pixel clock */
-		csi_param.mclk = 27000000;
-	} else {
+	else
 		csi_param.clk_mode = IPU_CSI_CLK_MODE_GATED_CLK;
-	}
 
 	csi_param.pixclk_pol = ifparm.u.bt656.latch_clk_inv;
 
@@ -1434,7 +1405,8 @@ exit:
  */
 static int mxc_v4l2_s_std(cam_data *cam, v4l2_std_id e)
 {
-	printk(KERN_ERR "In mxc_v4l2_s_std %Lx\n", e);
+	pr_debug("In mxc_v4l2_s_std %Lx\n", e);
+
 	if (e == V4L2_STD_PAL) {
 		pr_debug("   Setting standard to PAL %Lx\n", V4L2_STD_PAL);
 		cam->standard.id = V4L2_STD_PAL;
@@ -1533,8 +1505,10 @@ static int mxc_v4l_dqueue(cam_data *cam, struct v4l2_buffer *buf)
 		return -ERESTARTSYS;
 	}
 
-	spin_lock_irqsave(&cam->dqueue_int_lock, lock_flags);
+	if (down_interruptible(&cam->busy_lock))
+		return -EBUSY;
 
+	spin_lock_irqsave(&cam->dqueue_int_lock, lock_flags);
 	cam->enc_counter--;
 
 	frame = list_entry(cam->done_q.next, struct mxc_v4l_frame, queue);
@@ -1557,8 +1531,9 @@ static int mxc_v4l_dqueue(cam_data *cam, struct v4l2_buffer *buf)
 	buf->flags = frame->buffer.flags;
 	buf->m = cam->frame[frame->index].buffer.m;
 	buf->timestamp = cam->frame[frame->index].buffer.timestamp;
-
 	spin_unlock_irqrestore(&cam->dqueue_int_lock, lock_flags);
+
+	up(&cam->busy_lock);
 	return retval;
 }
 
@@ -1697,8 +1672,12 @@ static int mxc_v4l_open(struct file *file)
 					cam_fmt.fmt.pix.pixelformat,
 					csi_param);
 
-		ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->mclk_source,
-				       true, true);
+		if (!cam->mclk_on[cam->mclk_source]) {
+			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C,
+					       cam->mclk_source,
+					       true, true);
+			cam->mclk_on[cam->mclk_source] = true;
+		}
 		vidioc_int_s_power(cam->sensor, 1);
 		vidioc_int_init(cam->sensor);
 		vidioc_int_dev_init(cam->sensor);
@@ -1746,8 +1725,12 @@ static int mxc_v4l_close(struct file *file)
 
 	if (--cam->open_count == 0) {
 		vidioc_int_s_power(cam->sensor, 0);
-		ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C, cam->csi,
-			false, false);
+		if (cam->mclk_on[cam->mclk_source]) {
+			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C,
+					       cam->mclk_source,
+					       false, false);
+			cam->mclk_on[cam->mclk_source] = false;
+		}
 
 		wait_event_interruptible(cam->power_queue,
 					 cam->low_power == false);
@@ -1893,8 +1876,9 @@ static long mxc_v4l_do_ioctl(struct file *file,
 	pr_debug("In MVC: mxc_v4l_do_ioctl %x\n", ioctlnr);
 	wait_event_interruptible(cam->power_queue, cam->low_power == false);
 	/* make this _really_ smp-safe */
-	if (down_interruptible(&cam->busy_lock))
-		return -EBUSY;
+	if (ioctlnr != VIDIOC_DQBUF)
+		if (down_interruptible(&cam->busy_lock))
+			return -EBUSY;
 
 	switch (ioctlnr) {
 	/*!
@@ -1955,15 +1939,10 @@ static long mxc_v4l_do_ioctl(struct file *file,
 		}
 
 		mxc_streamoff(cam);
-		if (req->memory & V4L2_MEMORY_MMAP)
+		if (req->memory & V4L2_MEMORY_MMAP) {
 			mxc_free_frame_buf(cam);
-		cam->enc_counter = 0;
-		INIT_LIST_HEAD(&cam->ready_q);
-		INIT_LIST_HEAD(&cam->working_q);
-		INIT_LIST_HEAD(&cam->done_q);
-
-		if (req->memory & V4L2_MEMORY_MMAP)
 			retval = mxc_allocate_frame_buf(cam, req->count);
+		}
 		break;
 	}
 
@@ -2388,7 +2367,8 @@ static long mxc_v4l_do_ioctl(struct file *file,
 		break;
 	}
 
-	up(&cam->busy_lock);
+	if (ioctlnr != VIDIOC_DQBUF)
+		up(&cam->busy_lock);
 	return retval;
 }
 
@@ -2522,6 +2502,8 @@ static void camera_callback(u32 mask, void *dev)
 
 	pr_debug("In MVC:camera_callback\n");
 
+	spin_lock(&cam->queue_int_lock);
+	spin_lock(&cam->dqueue_int_lock);
 	if (!list_empty(&cam->working_q)) {
 		do_gettimeofday(&cur_time);
 
@@ -2576,6 +2558,8 @@ next:
 	}
 
 	cam->local_buf_num = (cam->local_buf_num == 0) ? 1 : 0;
+	spin_unlock(&cam->dqueue_int_lock);
+	spin_unlock(&cam->queue_int_lock);
 
 	return;
 }
@@ -2652,8 +2636,10 @@ static void init_camera_struct(cam_data *cam, struct platform_device *pdev)
 	cam->win.w.left = 0;
 	cam->win.w.top = 0;
 
+	cam->ipu_id = pdata->ipu;
 	cam->csi = pdata->csi;
 	cam->mclk_source = pdata->mclk_source;
+	cam->mclk_on[cam->mclk_source] = false;
 
 	cam->enc_callback = camera_callback;
 	init_waitqueue_head(&cam->power_queue);
@@ -2662,7 +2648,7 @@ static void init_camera_struct(cam_data *cam, struct platform_device *pdev)
 
 	cam->self = kmalloc(sizeof(struct v4l2_int_device), GFP_KERNEL);
 	cam->self->module = THIS_MODULE;
-	sprintf(cam->self->name, "mxc_v4l2_cap%d", cam->csi);
+	sprintf(cam->self->name, "mxc_v4l2_cap%d", pdev->id);
 	cam->self->type = v4l2_int_type_master;
 	cam->self->u.master = &mxc_v4l2_master;
 }
@@ -2694,6 +2680,17 @@ static ssize_t show_overlay(struct device *dev,
 		return sprintf(buf, "overlay off\n");
 }
 static DEVICE_ATTR(fsl_v4l2_overlay_property, S_IRUGO, show_overlay, NULL);
+
+static ssize_t show_csi(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	struct video_device *video_dev = container_of(dev,
+						struct video_device, dev);
+	cam_data *cam = video_get_drvdata(video_dev);
+
+	return sprintf(buf, "ipu%d_csi%d\n", cam->ipu_id, cam->csi);
+}
+static DEVICE_ATTR(fsl_csi_property, S_IRUGO, show_csi, NULL);
 
 /*!
  * This function is called to probe the devices if registered.
@@ -2740,6 +2737,11 @@ static int mxc_v4l2_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Error on creating sysfs file"
 			" for overlay\n");
 
+	if (device_create_file(&cam->video_dev->dev,
+			&dev_attr_fsl_csi_property))
+		dev_err(&pdev->dev, "Error on creating sysfs file"
+			" for csi number\n");
+
 	return 0;
 }
 
@@ -2763,6 +2765,8 @@ static int mxc_v4l2_remove(struct platform_device *pdev)
 			&dev_attr_fsl_v4l2_capture_property);
 		device_remove_file(&cam->video_dev->dev,
 			&dev_attr_fsl_v4l2_overlay_property);
+		device_remove_file(&cam->video_dev->dev,
+			&dev_attr_fsl_csi_property);
 
 		pr_info("V4L2 freeing image input device\n");
 		v4l2_int_device_unregister(cam->self);
@@ -2807,8 +2811,15 @@ static int mxc_v4l2_suspend(struct platform_device *pdev, pm_message_t state)
 		cam->enc_disable(cam);
 	}
 
-	if (cam->sensor && cam->open_count)
+	if (cam->sensor && cam->open_count) {
+		if (cam->mclk_on[cam->mclk_source]) {
+			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C,
+					       cam->mclk_source,
+					       false, false);
+			cam->mclk_on[cam->mclk_source] = false;
+		}
 		vidioc_int_s_power(cam->sensor, 0);
+	}
 
 	up(&cam->busy_lock);
 
@@ -2839,8 +2850,16 @@ static int mxc_v4l2_resume(struct platform_device *pdev)
 	cam->low_power = false;
 	wake_up_interruptible(&cam->power_queue);
 
-	if (cam->sensor && cam->open_count)
+	if (cam->sensor && cam->open_count) {
 		vidioc_int_s_power(cam->sensor, 1);
+
+		if (!cam->mclk_on[cam->mclk_source]) {
+			ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_I2C,
+					       cam->mclk_source,
+					       true, true);
+			cam->mclk_on[cam->mclk_source] = true;
+		}
+	}
 
 	if (cam->overlay_on == true)
 		start_preview(cam);

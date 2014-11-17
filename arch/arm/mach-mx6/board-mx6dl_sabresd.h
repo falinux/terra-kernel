@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2012-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -66,7 +66,6 @@ static iomux_v3_cfg_t mx6dl_sabresd_pads[] = {
 
 	/* I2C3 */
 	MX6DL_PAD_GPIO_3__I2C3_SCL,
-	MX6DL_PAD_GPIO_6__I2C3_SDA,
 
 	/* DISPLAY */
 	MX6DL_PAD_DI0_DISP_CLK__IPU1_DI0_DISP_CLK,
@@ -167,7 +166,7 @@ static iomux_v3_cfg_t mx6dl_sabresd_pads[] = {
 	MX6DL_PAD_SD4_DAT7__USDHC4_DAT7_50MHZ,
 
 	/* HDMI_CEC_IN*/
-	MX6DL_PAD_KEY_ROW2__GPIO_4_11,
+	MX6DL_PAD_KEY_ROW2__HDMI_TX_CEC_LINE,
 
 	/* CCM - Audio, Camera clock  */
 	MX6DL_PAD_GPIO_0__CCM_CLKO,
@@ -263,8 +262,8 @@ static iomux_v3_cfg_t mx6dl_sabresd_pads[] = {
 	/* ACCL_INT_INT */
 	MX6DL_PAD_SD1_CMD__GPIO_1_18,
 
-	/* USR_DEF_GRN_LED */
-	MX6DL_PAD_GPIO_1__GPIO_1_1,
+	/*WDOG_B to reset pmic*/
+	MX6DL_PAD_GPIO_1__WDOG2_WDOG_B,
 	/* USR_DEF_RED_LED */
 	MX6DL_PAD_GPIO_2__GPIO_1_2,
 };

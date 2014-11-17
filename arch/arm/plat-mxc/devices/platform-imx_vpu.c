@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  * Jason Chen <jason.chen@freescale.com>
  *
  * This program is free software; you can redistribute it and/or modify it under
@@ -123,7 +123,7 @@ void mx6q_vpu_reset(void)
 	 __raw_writel(reg, src_base + 0x18);
 
 	reg = __raw_readl(src_base);
-	reg |= 0x5;    /* warm reset vpu */
+	reg |= 0x4;    /* warm reset vpu */
 	__raw_writel(reg, src_base);
 	while (__raw_readl(src_base) & 0x04)
 		;
@@ -166,6 +166,9 @@ struct platform_device *__init imx_add_vpu(
 	pdata.pg = data->pg;
 	pdata.iram_enable = data->iram_enable;
 	pdata.iram_size = data->iram_size;
+
+	if (!fuse_dev_is_available(MXC_DEV_VPU))
+		return ERR_PTR(-ENODEV);
 
 	if (cpu_is_mx6dl())
 		pdata.iram_enable = false;

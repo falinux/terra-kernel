@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -52,10 +52,9 @@
 typedef void (*driver_vbus_func)(bool);
 
 void __iomem *imx_otg_base;
-static  driver_vbus_func s_driver_vbus;
-static int stop_mode_refcount;
+static  driver_vbus_func s_h1_driver_vbus;
+static  driver_vbus_func s_otg_driver_vbus;
 
-DEFINE_MUTEX(usb_common_mutex);
 EXPORT_SYMBOL(imx_otg_base);
 
 #define MXC_NUMBER_USB_TRANSCEIVER 6
@@ -73,51 +72,28 @@ bool usb_icbug_swfix_need(void)
 }
 EXPORT_SYMBOL(usb_icbug_swfix_need);
 
-/*
-  * The Mx6 phy sometimes work abnormally after system suspend/resume if the 1V1 is off.
-  * So we should keep the 1V1 active during the system suspend if any USB host enabled.
-  * Set stop_mode_config when any USB host enabled by default, it will impact on system power.
-  * #define DISABLE_STOP_MODE will disable the feature.
-  */
-#ifndef DISABLE_STOP_MODE
-int usb_stop_mode_refcount(bool enable)
-{
-	if (enable)
-		stop_mode_refcount++;
-	else
-		stop_mode_refcount--;
-	return stop_mode_refcount;
-}
-#else
-int usb_stop_mode_refcount(bool enable)
-{
-	return 0;
-}
-#endif
-EXPORT_SYMBOL(usb_stop_mode_refcount);
-
-void usb_stop_mode_lock(void)
-{
-	mutex_lock(&usb_common_mutex);
-}
-EXPORT_SYMBOL(usb_stop_mode_lock);
-
-void usb_stop_mode_unlock(void)
-{
-	mutex_unlock(&usb_common_mutex);
-}
-EXPORT_SYMBOL(usb_stop_mode_unlock);
-
 void mx6_set_host1_vbus_func(driver_vbus_func driver_vbus)
 {
-	s_driver_vbus = driver_vbus;
+	s_h1_driver_vbus = driver_vbus;
 }
 
-void mx6_set_usb_host1_vbus_func(driver_vbus_func *driver_vbus)
+void mx6_get_host1_vbus_func(driver_vbus_func *driver_vbus)
 {
-	*driver_vbus = s_driver_vbus;
+	*driver_vbus = s_h1_driver_vbus;
 }
-EXPORT_SYMBOL(mx6_set_usb_host1_vbus_func);
+EXPORT_SYMBOL(mx6_get_host1_vbus_func);
+
+void mx6_set_otghost_vbus_func(driver_vbus_func driver_vbus)
+{
+	s_otg_driver_vbus = driver_vbus;
+}
+
+void mx6_get_otghost_vbus_func(driver_vbus_func *driver_vbus)
+{
+	*driver_vbus = s_otg_driver_vbus;
+}
+EXPORT_SYMBOL(mx6_get_otghost_vbus_func);
+
 
 
 enum fsl_usb2_modes get_usb_mode(struct fsl_usb2_platform_data *pdata)
@@ -206,7 +182,7 @@ void fsl_usb_xcvr_unregister(struct fsl_xcvr_ops *xcvr_ops)
 
 	pr_debug("%s\n", __func__);
 	for (i = 0; i < MXC_NUMBER_USB_TRANSCEIVER; i++) {
-		if (g_xc_ops[i] == xcvr_ops) {
+		if (g_xc_ops[i] && (g_xc_ops[i] == xcvr_ops)) {
 			g_xc_ops[i] = NULL;
 			return;
 		}
@@ -227,7 +203,7 @@ static struct fsl_xcvr_ops *fsl_usb_get_xcvr(char *name)
 	}
 
 	for (i = 0; i < MXC_NUMBER_USB_TRANSCEIVER; i++) {
-		if (strcmp(g_xc_ops[i]->name, name) == 0) {
+		if (g_xc_ops[i] && (strcmp(g_xc_ops[i]->name, name) == 0)) {
 			return g_xc_ops[i];
 		}
 	}

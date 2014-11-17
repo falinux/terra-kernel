@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,6 +25,7 @@
 #include <linux/delay.h>
 
 #include <mach/hardware.h>
+#include <mach/system.h>
 #include <asm/io.h>
 #include <asm/mach/map.h>
 
@@ -33,8 +34,10 @@
 
 struct cpu_op *(*get_cpu_op)(int *op);
 bool enable_wait_mode = true;
-u32 arm_max_freq = CPU_AT_1GHz;
+u32 enable_ldo_mode = LDO_MODE_DEFAULT;
+u32 arm_max_freq = CPU_AT_1_2GHz;
 bool mem_clk_on_in_wait;
+bool enet_to_gpio_6;
 int chip_rev;
 
 void __iomem *gpc_base;
@@ -119,8 +122,14 @@ static int __init post_cpu_init(void)
 {
 	unsigned int reg;
 	void __iomem *base;
+	u32	iram_size;
 
-	iram_init(MX6Q_IRAM_BASE_ADDR, MX6Q_IRAM_SIZE);
+	if (cpu_is_mx6q())
+		iram_size = MX6Q_IRAM_SIZE;
+	else
+		iram_size = MX6DL_MX6SL_IRAM_SIZE;
+
+	iram_init(MX6Q_IRAM_BASE_ADDR, iram_size);
 
 	base = ioremap(AIPS1_ON_BASE_ADDR, PAGE_SIZE);
 	__raw_writel(0x0, base + 0x40);
@@ -205,6 +214,13 @@ static int __init post_cpu_init(void)
 	else
 		chip_rev = mx6sl_revision();
 
+	/* mx6sl doesn't have pcie. save power, disable PCIe PHY */
+	if (!cpu_is_mx6sl()) {
+		reg = __raw_readl(IOMUXC_GPR1);
+		reg = reg & (~IOMUXC_GPR1_PCIE_REF_CLK_EN);
+		reg |= IOMUXC_GPR1_TEST_POWERDOWN;
+		__raw_writel(reg, IOMUXC_GPR1);
+	}
 	return 0;
 }
 postcore_initcall(post_cpu_init);
@@ -239,6 +255,19 @@ static int __init arm_core_max(char *p)
 
 early_param("arm_freq", arm_core_max);
 
+static int __init enable_ldo(char *p)
+{
+	if (memcmp(p, "on", 2) == 0) {
+		enable_ldo_mode = LDO_MODE_ENABLED;
+		p += 2;
+	} else if (memcmp(p, "off", 3) == 0) {
+		enable_ldo_mode = LDO_MODE_BYPASSED;
+		p += 3;
+	}
+	return 0;
+}
+early_param("ldo_active", enable_ldo);
+
 static int __init enable_mem_clk_in_wait(char *p)
 {
 	mem_clk_on_in_wait = true;
@@ -248,5 +277,10 @@ static int __init enable_mem_clk_in_wait(char *p)
 
 early_param("mem_clk_on", enable_mem_clk_in_wait);
 
+static int __init set_enet_irq_to_gpio(char *p)
+{
+	enet_to_gpio_6 = true;
+	return 0;
+}
 
-
+early_param("enet_gpio_6", set_enet_irq_to_gpio);

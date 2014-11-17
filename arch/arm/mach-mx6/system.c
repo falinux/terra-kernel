@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -51,15 +51,18 @@
 extern unsigned int gpc_wake_irq[4];
 
 static void __iomem *gpc_base = IO_ADDRESS(GPC_BASE_ADDR);
+extern struct clk *mmdc_ch0_axi;
 
 volatile unsigned int num_cpu_idle;
 volatile unsigned int num_cpu_idle_lock = 0x0;
 int wait_mode_arm_podf;
 int cur_arm_podf;
+bool enet_is_active;
 void arch_idle_with_workaround(int cpu);
 
 extern void *mx6sl_wfi_iram_base;
-extern void (*mx6sl_wfi_iram)(int arm_podf, unsigned long wfi_iram_addr);
+extern void (*mx6sl_wfi_iram)(int arm_podf, unsigned long wfi_iram_addr, \
+			int audio_mode);
 extern void mx6_wait(void *num_cpu_idle_lock, void *num_cpu_idle, \
 				int wait_arm_podf, int cur_arm_podf);
 extern bool enable_wait_mode;
@@ -79,15 +82,43 @@ void gpc_set_wakeup(unsigned int irq[4])
 	return;
 }
 
+void gpc_mask_single_irq(int irq, bool enable)
+{
+	void __iomem *reg;
+	u32 val;
+
+	reg = gpc_base + 0x8 + (irq / 32 - 1) * 4;
+	val = __raw_readl(reg);
+	if (enable)
+		val |= 1 << (irq % 32);
+	else
+		val &= ~(1 << (irq % 32));
+	__raw_writel(val, reg);
+
+	return;
+}
+
 /* set cpu low power mode before WFI instruction */
 void mxc_cpu_lp_set(enum mxc_cpu_pwr_mode mode)
 {
 
 	int stop_mode = 0;
 	void __iomem *anatop_base = IO_ADDRESS(ANATOP_BASE_ADDR);
-	u32 ccm_clpcr, anatop_val, reg;
+	u32 ccm_clpcr, anatop_val;
 
 	ccm_clpcr = __raw_readl(MXC_CCM_CLPCR) & ~(MXC_CCM_CLPCR_LPM_MASK);
+	/*
+	 * CCM state machine has restriction that, everytime enable
+	 * LPM mode, we need to make sure last wakeup from LPM mode
+	 * is a dsm_wakeup_signal, which means the wakeup source
+	 * must be seen by GPC, then CCM will clean its state machine
+	 * and re-sample necessary signal to decide whether it can
+	 * enter LPM mode. Here we use the forever pending irq #125,
+	 * unmask it before we enable LPM mode and mask it after LPM
+	 * is enabled, this flow will make sure CCM state machine in
+	 * reliable state before we enter LPM mode.
+	 */
+	gpc_mask_single_irq(MXC_INT_CHEETAH_PARITY, false);
 
 	switch (mode) {
 	case WAIT_CLOCKED:
@@ -132,21 +163,37 @@ void mxc_cpu_lp_set(enum mxc_cpu_pwr_mode mode)
 			stop_mode = 2;
 		}
 		break;
-	case STOP_POWER_ON:
+	case STOP_XTAL_ON:
 		ccm_clpcr |= 0x2 << MXC_CCM_CLPCR_LPM_OFFSET;
+		ccm_clpcr |= MXC_CCM_CLPCR_VSTBY;
+		ccm_clpcr &= ~MXC_CCM_CLPCR_SBYOS;
+		if (cpu_is_mx6sl()) {
+			ccm_clpcr |= MXC_CCM_CLPCR_BYP_MMDC_CH0_LPM_HS;
+			ccm_clpcr |= MXC_CCM_CLPCR_BYPASS_PMIC_VFUNC_READY;
+		} else
+			ccm_clpcr |= MXC_CCM_CLPCR_BYP_MMDC_CH1_LPM_HS;
+		stop_mode = 3;
 
 		break;
 	default:
 		printk(KERN_WARNING "UNKNOWN cpu power mode: %d\n", mode);
+		gpc_mask_single_irq(MXC_INT_CHEETAH_PARITY, true);
 		return;
 	}
 
 	if (stop_mode > 0) {
 		gpc_set_wakeup(gpc_wake_irq);
 		/* Power down and power up sequence */
-		__raw_writel(0xFFFFFFFF, gpc_base + GPC_PGC_CPU_PUPSCR_OFFSET);
-		__raw_writel(0xFFFFFFFF, gpc_base + GPC_PGC_CPU_PDNSCR_OFFSET);
-		if (stop_mode == 2) {
+		/* The PUPSCR counter counts in terms of CLKIL (32KHz) cycles.
+		   * The PUPSCR should include the time it takes for the ARM LDO to
+		   * ramp up.
+		   */
+		__raw_writel(0xf0f, gpc_base + GPC_PGC_CPU_PUPSCR_OFFSET);
+		/* The PDNSCR is a counter that counts in IPG_CLK cycles. This counter
+		  * can be set to minimum values to power down faster.
+		  */
+		__raw_writel(0x101, gpc_base + GPC_PGC_CPU_PDNSCR_OFFSET);
+		if (stop_mode >= 2) {
 			/* dormant mode, need to power off the arm core */
 			__raw_writel(0x1, gpc_base + GPC_PGC_CPU_PDN_OFFSET);
 			if (cpu_is_mx6q() || cpu_is_mx6dl()) {
@@ -171,38 +218,40 @@ void mxc_cpu_lp_set(enum mxc_cpu_pwr_mode mode)
 						HW_ANADIG_REG_CORE);
 				}
 			} else {
-				/* Disable VDDHIGH_IN to VDDSNVS_IN power path,
-				 * only used when VDDSNVS_IN is powered by dedicated
-				 * power rail */
-				anatop_val = __raw_readl(anatop_base +
-					HW_ANADIG_ANA_MISC0);
-				anatop_val |= BM_ANADIG_ANA_MISC0_RTC_RINGOSC_EN;
-				__raw_writel(anatop_val, anatop_base +
-					HW_ANADIG_ANA_MISC0);
-				/* We need to allow the memories to be clock gated
-				 * in STOP mode, else the power consumption will
-				 * be very high. */
-				reg = __raw_readl(MXC_CCM_CGPR);
-				reg |= MXC_CCM_CGPR_MEM_IPG_STOP_MASK;
-				__raw_writel(reg, MXC_CCM_CGPR);
+				if (stop_mode == 2) {
+					/* Disable VDDHIGH_IN to VDDSNVS_IN
+					  * power path, only used when VDDSNVS_IN
+					  * is powered by dedicated
+					 * power rail */
+					anatop_val = __raw_readl(anatop_base +
+						HW_ANADIG_ANA_MISC0);
+					anatop_val |= BM_ANADIG_ANA_MISC0_RTC_RINGOSC_EN;
+					__raw_writel(anatop_val, anatop_base +
+						HW_ANADIG_ANA_MISC0);
+					/* Need to enable pull down if 2P5 is disabled */
+					anatop_val = __raw_readl(anatop_base +
+						HW_ANADIG_REG_2P5);
+					anatop_val |= BM_ANADIG_REG_2P5_ENABLE_PULLDOWN;
+					__raw_writel(anatop_val, anatop_base +
+						HW_ANADIG_REG_2P5);
+				}
 			}
-			/* DL's TO1.0 can't support DSM mode due to ipg glitch */
-			if (mx6dl_revision() != IMX_CHIP_REVISION_1_0)
+			if (stop_mode != 3) {
+				/* Make sure we clear WB_COUNT
+				  * and re-config it.
+				  */
+				__raw_writel(__raw_readl(MXC_CCM_CCR) &
+					(~MXC_CCM_CCR_WB_COUNT_MASK),
+					MXC_CCM_CCR);
+				/* Reconfigure WB, need to set WB counter
+				 * to 0x7 to make sure it work normally */
 				__raw_writel(__raw_readl(MXC_CCM_CCR) |
-					MXC_CCM_CCR_RBC_EN, MXC_CCM_CCR);
+					(0x7 << MXC_CCM_CCR_WB_COUNT_OFFSET),
+					MXC_CCM_CCR);
 
-			/* Make sure we clear WB_COUNT and re-config it */
-			__raw_writel(__raw_readl(MXC_CCM_CCR) &
-				(~MXC_CCM_CCR_WB_COUNT_MASK) &
-				(~MXC_CCM_CCR_REG_BYPASS_CNT_MASK), MXC_CCM_CCR);
-			udelay(80);
-			/* Reconfigurate WB and RBC counter */
-			__raw_writel(__raw_readl(MXC_CCM_CCR) |
-				(0x1 << MXC_CCM_CCR_WB_COUNT_OFFSET) |
-				(0x20 << MXC_CCM_CCR_REG_BYPASS_CNT_OFFSET), MXC_CCM_CCR);
-
-			/* Set WB_PER enable */
-			ccm_clpcr |= MXC_CCM_CLPCR_WB_PER_AT_LPM;
+				/* Set WB_PER enable */
+				ccm_clpcr |= MXC_CCM_CLPCR_WB_PER_AT_LPM;
+			}
 		}
 		if (cpu_is_mx6sl() ||
 			(mx6q_revision() > IMX_CHIP_REVISION_1_1) ||
@@ -214,7 +263,7 @@ void mxc_cpu_lp_set(enum mxc_cpu_pwr_mode mode)
 			  */
 			reg = __raw_readl(MXC_CCM_CGPR);
 			reg |= MXC_CCM_CGPR_MEM_IPG_STOP_MASK;
-			if (!cpu_is_mx6sl()) {
+			if (!cpu_is_mx6sl() && stop_mode >= 2) {
 				/*
 				  * For MX6QTO1.2 or later and MX6DLTO1.1 or later,
 				  * ensure that the CCM_CGPR bit 17 is cleared before
@@ -226,6 +275,7 @@ void mxc_cpu_lp_set(enum mxc_cpu_pwr_mode mode)
 		}
 	}
 	__raw_writel(ccm_clpcr, MXC_CCM_CLPCR);
+	gpc_mask_single_irq(MXC_INT_CHEETAH_PARITY, true);
 }
 
 extern int tick_broadcast_oneshot_active(void);
@@ -253,7 +303,12 @@ void arch_idle_single_core(void)
 		ca9_do_idle();
 	} else {
 		if (low_bus_freq_mode || audio_bus_freq_mode) {
-			if (cpu_is_mx6sl() && low_bus_freq_mode) {
+			int ddr_usecount = 0;
+			if ((mmdc_ch0_axi != NULL))
+				ddr_usecount = clk_get_usecount(mmdc_ch0_axi);
+
+			if (cpu_is_mx6sl() && (ddr_usecount == 1)  &&
+				(low_bus_freq_mode || audio_bus_freq_mode)) {
 				/* In this mode PLL2 i already in bypass,
 				  * ARM is sourced from PLL1. The code in IRAM
 				  * will set ARM to be sourced from STEP_CLK
@@ -266,23 +321,48 @@ void arch_idle_single_core(void)
 				  * we can lower DDR freq.
 				  */
 				mx6sl_wfi_iram(org_arm_podf,
-					(unsigned long)mx6sl_wfi_iram_base);
+					(unsigned long)mx6sl_wfi_iram_base,
+					audio_bus_freq_mode);
 			} else {
 				/* Need to set ARM to run at 24MHz since IPG
 				  * is at 12MHz. This is valid for audio mode on
 				  * MX6SL, and all low power modes on MX6DLS.
 				  */
-				/* PLL1_SW_CLK is sourced from PLL2_PFD2400MHz
-				  * at this point. Move it to bypassed PLL1.
-				  */
-				reg = __raw_readl(MXC_CCM_CCSR);
-				reg &= ~MXC_CCM_CCSR_PLL1_SW_CLK_SEL;
-				__raw_writel(reg, MXC_CCM_CCSR);
+				if (cpu_is_mx6sl() && low_bus_freq_mode) {
+					/* ARM is from PLL1, need to switch to
+					  * STEP_CLK sourced from 24MHz.
+					  */
+					/* Swtich STEP_CLK to 24MHz. */
+					reg = __raw_readl(MXC_CCM_CCSR);
+					reg &= ~MXC_CCM_CCSR_STEP_SEL;
+					__raw_writel(reg, MXC_CCM_CCSR);
+					/* Set PLL1_SW_CLK to be from
+					  *STEP_CLK.
+					  */
+					reg = __raw_readl(MXC_CCM_CCSR);
+					reg |= MXC_CCM_CCSR_PLL1_SW_CLK_SEL;
+					__raw_writel(reg, MXC_CCM_CCSR);
 
+				} else {
+					/* PLL1_SW_CLK is sourced from
+					  * PLL2_PFD2_400MHz at this point.
+					  * Move it to bypassed PLL1.
+					  */
+					reg = __raw_readl(MXC_CCM_CCSR);
+					reg &= ~MXC_CCM_CCSR_PLL1_SW_CLK_SEL;
+					__raw_writel(reg, MXC_CCM_CCSR);
+				}
 				ca9_do_idle();
 
-				reg |= MXC_CCM_CCSR_PLL1_SW_CLK_SEL;
-				__raw_writel(reg, MXC_CCM_CCSR);
+				if (cpu_is_mx6sl() && low_bus_freq_mode) {
+					/* Set PLL1_SW_CLK to be from PLL1 */
+					reg = __raw_readl(MXC_CCM_CCSR);
+					reg &= ~MXC_CCM_CCSR_PLL1_SW_CLK_SEL;
+					__raw_writel(reg, MXC_CCM_CCSR);
+				} else {
+					reg |= MXC_CCM_CCSR_PLL1_SW_CLK_SEL;
+					__raw_writel(reg, MXC_CCM_CCSR);
+				}
 			}
 		} else {
 			/*
@@ -303,7 +383,7 @@ void arch_idle_single_core(void)
 	}
 }
 
-void arch_idle_with_workaround(cpu)
+void arch_idle_with_workaround(int cpu)
 {
 	u32 podf = wait_mode_arm_podf;
 
@@ -322,18 +402,10 @@ void arch_idle_with_workaround(cpu)
 
 }
 
-void arch_idle_multi_core(void)
+void arch_idle_multi_core(int cpu)
 {
 	u32 reg;
-	int cpu = smp_processor_id();
 
-#ifdef CONFIG_LOCAL_TIMERS
-	if (!tick_broadcast_oneshot_active()
-		|| !tick_oneshot_mode_active())
-		return;
-
-	clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ENTER, &cpu);
-#endif
 	/* iMX6Q and iMX6DL */
 	if ((cpu_is_mx6q() && chip_rev >= IMX_CHIP_REVISION_1_2) ||
 		(cpu_is_mx6dl() && chip_rev >= IMX_CHIP_REVISION_1_1)) {
@@ -351,24 +423,37 @@ void arch_idle_multi_core(void)
 		ca9_do_idle();
 	} else
 		arch_idle_with_workaround(cpu);
-#ifdef CONFIG_LOCAL_TIMERS
-	clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_EXIT, &cpu);
-#endif
-
 }
 
 void arch_idle(void)
 {
+	int cpu = smp_processor_id();
+
 	if (enable_wait_mode) {
-		mxc_cpu_lp_set(WAIT_UNCLOCKED_POWER_OFF);
+#ifdef CONFIG_LOCAL_TIMERS
+		if (!tick_broadcast_oneshot_active()
+			|| !tick_oneshot_mode_active())
+			return;
+
+		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_ENTER, &cpu);
+#endif
+		if (enet_is_active)
+			/* Don't allow the chip to enter WAIT mode if enet is active
+			  * and the GPIO workaround for ENET interrupts is not used,
+			  * since all ENET interrupts donot wake up the SOC.
+			  */
+			mxc_cpu_lp_set(WAIT_CLOCKED);
+		else
+			mxc_cpu_lp_set(WAIT_UNCLOCKED_POWER_OFF);
 		if (mem_clk_on_in_wait) {
 			u32 reg;
 			/*
 			  * MX6SL, MX6Q (TO1.2 or later) and
-			  * MX6DL (TO1.1 or later) have a bit in CCM_CGPR that
-			  * when cleared keeps the clocks to memories ON
-			  * when ARM is in WFI. This mode can be used when
-			  * IPG clock is very low (12MHz) and the ARM:IPG ratio
+			  * MX6DL (TO1.1 or later) have a bit in
+			  * CCM_CGPR that when cleared keeps the
+			  * clocks to memories ON when ARM is in WFI.
+			  * This mode can be used when IPG clock is
+			  * very low (12MHz) and the ARM:IPG ratio
 			  * perhaps cannot be maintained.
 			  */
 			reg = __raw_readl(MXC_CCM_CGPR);
@@ -380,8 +465,11 @@ void arch_idle(void)
 			/* iMX6SL or iMX6DLS */
 			arch_idle_single_core();
 		else
-			arch_idle_multi_core();
-	} else {
+			arch_idle_multi_core(cpu);
+#ifdef CONFIG_LOCAL_TIMERS
+		clockevents_notify(CLOCK_EVT_NOTIFY_BROADCAST_EXIT, &cpu);
+#endif
+	}  else {
 		mxc_cpu_lp_set(WAIT_CLOCKED);
 		ca9_do_idle();
 	}
@@ -516,7 +604,7 @@ void mxc_clear_mfgmode(void)
 #endif
 
 #ifdef CONFIG_MXC_REBOOT_ANDROID_CMD
-/* This function will set a bit on SRC_GPR10[7-8] bits to enter
+/* This function will set a bit on SNVS_LPGPR[7-8] bits to enter
  * special boot mode.  These bits will not clear by watchdog reset, so
  * it can be checked by bootloader to choose enter different mode.*/
 
@@ -527,18 +615,18 @@ void do_switch_recovery(void)
 {
 	u32 reg;
 
-	reg = __raw_readl(SRC_BASE_ADDR + SRC_GPR10);
+	reg = __raw_readl(MX6Q_SNVS_BASE_ADDR + SNVS_LPGPR);
 	reg |= ANDROID_RECOVERY_BOOT;
-	__raw_writel(reg, SRC_BASE_ADDR + SRC_GPR10);
+	__raw_writel(reg, MX6Q_SNVS_BASE_ADDR + SNVS_LPGPR);
 }
 
 void do_switch_fastboot(void)
 {
 	u32 reg;
 
-	reg = __raw_readl(SRC_BASE_ADDR + SRC_GPR10);
+	reg = __raw_readl(MX6Q_SNVS_BASE_ADDR + SNVS_LPGPR);
 	reg |= ANDROID_FASTBOOT_BOOT;
-	__raw_writel(reg, SRC_BASE_ADDR + SRC_GPR10);
+	__raw_writel(reg, MX6Q_SNVS_BASE_ADDR + SNVS_LPGPR);
 }
 #endif
 

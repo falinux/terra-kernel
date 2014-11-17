@@ -1,5 +1,5 @@
 /*
- * Copyright 2005-2012 Freescale Semiconductor, Inc.
+ * Copyright 2005-2013 Freescale Semiconductor, Inc.
  */
 
 /*
@@ -94,6 +94,7 @@ typedef enum {
 /*! @{ */
 #define IPU_PIX_FMT_GENERIC fourcc('I', 'P', 'U', '0')	/*!< IPU Generic Data */
 #define IPU_PIX_FMT_GENERIC_32 fourcc('I', 'P', 'U', '1')	/*!< IPU Generic Data */
+#define IPU_PIX_FMT_GENERIC_16 fourcc('I', 'P', 'U', '2')	/*!< IPU Generic Data */
 #define IPU_PIX_FMT_LVDS666 fourcc('L', 'V', 'D', '6')	/*!< IPU Generic Data */
 #define IPU_PIX_FMT_LVDS888 fourcc('L', 'V', 'D', '8')	/*!< IPU Generic Data */
 /*! @} */
@@ -168,6 +169,14 @@ struct ipu_deinterlace {
 	u8	motion; /*see ipu_motion_sel*/
 #define IPU_DEINTERLACE_FIELD_TOP	0
 #define IPU_DEINTERLACE_FIELD_BOTTOM	1
+#define IPU_DEINTERLACE_FIELD_MASK	\
+		(IPU_DEINTERLACE_FIELD_TOP | IPU_DEINTERLACE_FIELD_BOTTOM)
+	/* deinterlace frame rate double flags */
+#define IPU_DEINTERLACE_RATE_EN		0x80
+#define IPU_DEINTERLACE_RATE_FRAME1	0x40
+#define IPU_DEINTERLACE_RATE_MASK	\
+		(IPU_DEINTERLACE_RATE_EN | IPU_DEINTERLACE_RATE_FRAME1)
+#define IPU_DEINTERLACE_MAX_FRAME	2
 	u8	field_fmt;
 };
 

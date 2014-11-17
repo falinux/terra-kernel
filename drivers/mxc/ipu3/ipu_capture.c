@@ -1,5 +1,5 @@
 /*
- * Copyright 2008-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2008-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -98,6 +98,7 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 		cfg_param.data_fmt = CSI_SENS_CONF_DATA_FMT_RGB_YUV444;
 		break;
 	case IPU_PIX_FMT_GENERIC:
+	case IPU_PIX_FMT_GENERIC_16:
 		cfg_param.data_fmt = CSI_SENS_CONF_DATA_FMT_BAYER;
 		break;
 	case IPU_PIX_FMT_RGB565:
@@ -125,13 +126,9 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 
 	_ipu_get(ipu);
 
-	_ipu_lock(ipu);
+	mutex_lock(&ipu->mutex_lock);
 
 	ipu_csi_write(ipu, csi, data, CSI_SENS_CONF);
-
-	/* Setup the mclk */
-	if (cfg_param.mclk > 0)
-		_ipu_csi_mclk_set(ipu, cfg_param.mclk, csi);
 
 	/* Setup sensor frame size */
 	ipu_csi_write(ipu, csi, (width - 1) | (height - 1) << 16, CSI_SENS_FRM_SIZE);
@@ -144,6 +141,21 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 		if (width == 720 && height == 625) {
 			/* PAL case */
 			/*
+			 * Field0BlankEnd = 0x6, Field0BlankStart = 0x2,
+			 * Field0ActiveEnd = 0x4, Field0ActiveStart = 0
+			 */
+			ipu_csi_write(ipu, csi, 0x40596, CSI_CCIR_CODE_1);
+			/*
+			 * Field1BlankEnd = 0x7, Field1BlankStart = 0x3,
+			 * Field1ActiveEnd = 0x5, Field1ActiveStart = 0x1
+			 */
+			ipu_csi_write(ipu, csi, 0xD07DF, CSI_CCIR_CODE_2);
+
+			ipu_csi_write(ipu, csi, 0xFF0000, CSI_CCIR_CODE_3);
+
+		} else if (width == 720 && height == 525) {
+			/* NTSC case */
+			/*
 			 * Field0BlankEnd = 0x7, Field0BlankStart = 0x3,
 			 * Field0ActiveEnd = 0x5, Field0ActiveStart = 0x1
 			 */
@@ -154,24 +166,10 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 			 */
 			ipu_csi_write(ipu, csi, 0x40596, CSI_CCIR_CODE_2);
 			ipu_csi_write(ipu, csi, 0xFF0000, CSI_CCIR_CODE_3);
-
-		} else if (width == 720 && height == 525) {
-			/* NTSC case */
-			/*
-			 * Field1BlankEnd = 0x6, Field1BlankStart = 0x2,
-			 * Field1ActiveEnd = 0x4, Field1ActiveStart = 0
-			 */
-			ipu_csi_write(ipu, csi, 0x40596, CSI_CCIR_CODE_1);
-			/*
-			 * Field0BlankEnd = 0x7, Field0BlankStart = 0x3,
-			 * Field0ActiveEnd = 0x5, Field0ActiveStart = 0x1
-			 */
-			ipu_csi_write(ipu, csi, 0xD07DF, CSI_CCIR_CODE_2);
-			ipu_csi_write(ipu, csi, 0xFF0000, CSI_CCIR_CODE_3);
 		} else {
 			dev_err(ipu->dev, "Unsupported CCIR656 interlaced "
 					"video mode\n");
-			_ipu_unlock(ipu);
+			mutex_unlock(&ipu->mutex_lock);
 			_ipu_put(ipu);
 			return -EINVAL;
 		}
@@ -197,7 +195,7 @@ ipu_csi_init_interface(struct ipu_soc *ipu, uint16_t width, uint16_t height,
 	dev_dbg(ipu->dev, "CSI_ACT_FRM_SIZE = 0x%08X\n",
 		ipu_csi_read(ipu, csi, CSI_ACT_FRM_SIZE));
 
-	_ipu_unlock(ipu);
+	mutex_unlock(&ipu->mutex_lock);
 
 	_ipu_put(ipu);
 
@@ -263,13 +261,13 @@ void ipu_csi_get_window_size(struct ipu_soc *ipu, uint32_t *width, uint32_t *hei
 
 	_ipu_get(ipu);
 
-	_ipu_lock(ipu);
+	mutex_lock(&ipu->mutex_lock);
 
 	reg = ipu_csi_read(ipu, csi, CSI_ACT_FRM_SIZE);
 	*width = (reg & 0xFFFF) + 1;
 	*height = (reg >> 16 & 0xFFFF) + 1;
 
-	_ipu_unlock(ipu);
+	mutex_unlock(&ipu->mutex_lock);
 
 	_ipu_put(ipu);
 }
@@ -287,11 +285,11 @@ void ipu_csi_set_window_size(struct ipu_soc *ipu, uint32_t width, uint32_t heigh
 {
 	_ipu_get(ipu);
 
-	_ipu_lock(ipu);
+	mutex_lock(&ipu->mutex_lock);
 
 	ipu_csi_write(ipu, csi, (width - 1) | (height - 1) << 16, CSI_ACT_FRM_SIZE);
 
-	_ipu_unlock(ipu);
+	mutex_unlock(&ipu->mutex_lock);
 
 	_ipu_put(ipu);
 }
@@ -311,14 +309,14 @@ void ipu_csi_set_window_pos(struct ipu_soc *ipu, uint32_t left, uint32_t top, ui
 
 	_ipu_get(ipu);
 
-	_ipu_lock(ipu);
+	mutex_lock(&ipu->mutex_lock);
 
 	temp = ipu_csi_read(ipu, csi, CSI_OUT_FRM_CTRL);
 	temp &= ~(CSI_HSC_MASK | CSI_VSC_MASK);
 	temp |= ((top << CSI_VSC_SHIFT) | (left << CSI_HSC_SHIFT));
 	ipu_csi_write(ipu, csi, temp, CSI_OUT_FRM_CTRL);
 
-	_ipu_unlock(ipu);
+	mutex_unlock(&ipu->mutex_lock);
 
 	_ipu_put(ipu);
 }
@@ -792,8 +790,12 @@ void _ipu_csi_wait4eof(struct ipu_soc *ipu, ipu_channel_t channel)
 		irq = IPU_IRQ_CSI2_OUT_EOF;
 	else if (channel == CSI_MEM3)
 		irq = IPU_IRQ_CSI3_OUT_EOF;
+	else if (channel == CSI_PRP_ENC_MEM)
+		irq = IPU_IRQ_PRP_ENC_OUT_EOF;
+	else if (channel == CSI_PRP_VF_MEM)
+		irq = IPU_IRQ_PRP_VF_OUT_EOF;
 	else{
-		dev_err(ipu->dev, "Not a CSI SMFC channel\n");
+		dev_err(ipu->dev, "Not a CSI channel\n");
 		return;
 	}
 

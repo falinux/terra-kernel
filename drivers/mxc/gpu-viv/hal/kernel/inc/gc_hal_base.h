@@ -1,6 +1,6 @@
 /****************************************************************************
 *
-*    Copyright (C) 2005 - 2012 by Vivante Corp.
+*    Copyright (C) 2005 - 2013 by Vivante Corp.
 *
 *    This program is free software; you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
@@ -17,8 +17,6 @@
 *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 *
 *****************************************************************************/
-
-
 
 
 #ifndef __gc_hal_base_h_
@@ -58,6 +56,8 @@ typedef struct _gcoDUMP *               gcoDUMP;
 typedef struct _gcoHARDWARE *           gcoHARDWARE;
 typedef union  _gcuVIDMEM_NODE *        gcuVIDMEM_NODE_PTR;
 
+typedef struct gcsATOM *                gcsATOM_PTR;
+
 #if gcdENABLE_VG
 typedef struct _gcoVG *                 gcoVG;
 typedef struct _gcsCOMPLETION_SIGNAL *	gcsCOMPLETION_SIGNAL_PTR;
@@ -66,10 +66,14 @@ typedef struct _gcsCONTEXT_MAP *		gcsCONTEXT_MAP_PTR;
 typedef void *                          gcoVG;
 #endif
 
+#if gcdSYNC
+typedef struct _gcoFENCE *              gcoFENCE;
+typedef struct _gcsSYNC_CONTEXT  *      gcsSYNC_CONTEXT_PTR;
+#endif
+
 /******************************************************************************\
 ******************************* Process local storage *************************
 \******************************************************************************/
-
 typedef struct _gcsPLS * gcsPLS_PTR;
 typedef struct _gcsPLS
 {
@@ -97,6 +101,16 @@ typedef struct _gcsPLS
     gctPOINTER                  eglSurfaceInfo;
     gceSURF_FORMAT              eglConfigFormat;
 
+    /* PorcessID of the constrcutor process */
+    gctUINT32                   processID;
+
+    /* Reference count for destructor. */
+    gcsATOM_PTR                 reference;
+    gctBOOL                     bKFS;
+#if gcdUSE_NPOT_PATCH
+    gctBOOL                     bNeedSupportNP2Texture;
+#endif
+
 }
 gcsPLS;
 
@@ -109,7 +123,7 @@ extern gcsPLS gcPLS;
 typedef struct _gcsTLS * gcsTLS_PTR;
 
 typedef void (* gctTLS_DESTRUCTOR) (
-    gcsTLS_PTR TLS
+    gcsTLS_PTR
     );
 
 typedef struct _gcsTLS
@@ -128,6 +142,9 @@ typedef struct _gcsTLS
 
 #ifndef VIVANTE_NO_3D
 	gco3D						engine3D;
+#endif
+#if gcdSYNC
+    gctBOOL                     fenceEnable;
 #endif
 	gco2D						engine2D;
     gctBOOL                     copied;
@@ -358,6 +375,11 @@ gcoHAL_GetFscaleValue(
     OUT gctUINT * FscaleValue,
     OUT gctUINT * MinFscaleValue,
     OUT gctUINT * MaxFscaleValue
+    );
+
+gceSTATUS
+gcoHAL_SetBltNP2Texture(
+    gctBOOL enable
     );
 
 #ifndef VIVANTE_NO_3D
@@ -636,8 +658,6 @@ gcoHAL_QueryChipFeature(
     IN gceFEATURE   Feature);
 
 #endif
-
-
 /******************************************************************************\
 ********************************** gcoOS Object *********************************
 \******************************************************************************/
@@ -1006,29 +1026,6 @@ gcoOS_GetPos(
     OUT gctUINT32 * Position
     );
 
-/* Perform a memory copy. */
-gceSTATUS
-gcoOS_MemCopy(
-    IN gctPOINTER Destination,
-    IN gctCONST_POINTER Source,
-    IN gctSIZE_T Bytes
-    );
-
-/* Perform a memory fill. */
-gceSTATUS
-gcoOS_MemFill(
-    IN gctPOINTER Destination,
-    IN gctUINT8 Filler,
-    IN gctSIZE_T Bytes
-    );
-
-/* Zero memory. */
-gceSTATUS
-gcoOS_ZeroMemory(
-    IN gctPOINTER Memory,
-    IN gctSIZE_T Bytes
-    );
-
 /* Same as strstr. */
 gceSTATUS
 gcoOS_StrStr(
@@ -1043,12 +1040,6 @@ gcoOS_StrFindReverse(
     IN gctCONST_STRING String,
     IN gctINT8 Character,
     OUT gctSTRING * Output
-    );
-
-gceSTATUS
-gcoOS_StrLen(
-    IN gctCONST_STRING String,
-    OUT gctSIZE_T * Length
     );
 
 gceSTATUS
@@ -1097,13 +1088,15 @@ gcoOS_StrToFloat(
     );
 
 /* Convert hex string to integer. */
-gceSTATUS gcoOS_HexStrToInt(
+gceSTATUS
+gcoOS_HexStrToInt(
 	IN gctCONST_STRING String,
 	OUT gctINT * Int
 	);
 
 /* Convert hex string to float. */
-gceSTATUS gcoOS_HexStrToFloat(
+gceSTATUS
+gcoOS_HexStrToFloat(
 	IN gctCONST_STRING String,
 	OUT gctFLOAT * Float
 	);
@@ -1182,6 +1175,11 @@ gcoOS_SetProfileSetting(
         );
 #endif
 
+gctBOOL
+gcoOS_IsNeededSupportNP2Texture(
+    IN gctCHAR* ProcName
+    );
+
 /* Query the video memory. */
 gceSTATUS
 gcoOS_QueryVideoMemory(
@@ -1207,10 +1205,13 @@ gcoOS_DetectProcessByName(
     IN gctCONST_STRING Name
     );
 
+gceSTATUS
+gcoOS_DetectProcessByEncryptedName(
+    IN gctCONST_STRING Name
+    );
+
 /*----------------------------------------------------------------------------*/
 /*----- Atoms ----------------------------------------------------------------*/
-
-typedef struct gcsATOM * gcsATOM_PTR;
 
 /* Construct an atom. */
 gceSTATUS
@@ -1421,7 +1422,7 @@ gcoOS_ReadRegister(
 gceSTATUS
 gcoOS_CacheClean(
     IN gcoOS Os,
-    IN gcuVIDMEM_NODE_PTR Node,
+    IN gctUINT64 Node,
     IN gctPOINTER Logical,
     IN gctSIZE_T Bytes
     );
@@ -1429,7 +1430,7 @@ gcoOS_CacheClean(
 gceSTATUS
 gcoOS_CacheFlush(
     IN gcoOS Os,
-    IN gcuVIDMEM_NODE_PTR Node,
+    IN gctUINT64 Node,
     IN gctPOINTER Logical,
     IN gctSIZE_T Bytes
     );
@@ -1437,7 +1438,7 @@ gcoOS_CacheFlush(
 gceSTATUS
 gcoOS_CacheInvalidate(
     IN gcoOS Os,
-    IN gcuVIDMEM_NODE_PTR Node,
+    IN gctUINT64 Node,
     IN gctPOINTER Logical,
     IN gctSIZE_T Bytes
     );
@@ -1767,23 +1768,9 @@ gcoSURF_MapUserSurface(
 gceSTATUS
 gcoSURF_QueryVidMemNode(
     IN gcoSURF Surface,
-    OUT gcuVIDMEM_NODE_PTR * Node,
+    OUT gctUINT64 * Node,
     OUT gcePOOL * Pool,
     OUT gctUINT_PTR Bytes
-    );
-
-/*  Set usage attribute of a surface. */
-gceSTATUS
-gcoSURF_SetUsage(
-    IN gcoSURF Surface,
-    IN gceSURF_USAGE Usage
-    );
-
-/*  Return usage attribute of a surface. */
-gceSTATUS
-gcoSURF_QueryUsage(
-    IN gcoSURF Surface,
-    OUT gceSURF_USAGE *Usage
     );
 
 /* Set the color type of the surface. */
@@ -1972,6 +1959,14 @@ gcoSURF_SetWindow(
     IN gctUINT Height
     );
 
+/* Set width/height alignment of the surface directly and calculate stride/size. This is only for dri backend now. Please be careful before use. */
+gceSTATUS
+gcoSURF_SetAlignment(
+    IN gcoSURF Surface,
+    IN gctUINT Width,
+    IN gctUINT Height
+    );
+
 /* Increase reference count of the surface. */
 gceSTATUS
 gcoSURF_ReferenceSurface(
@@ -2003,6 +1998,12 @@ gceSTATUS
 gcoSURF_SetOffset(
     IN gcoSURF Surface,
     IN gctUINT Offset
+    );
+
+gceSTATUS
+gcoSURF_GetOffset(
+    IN gcoSURF Surface,
+    OUT gctUINT *Offset
     );
 
 gceSTATUS
@@ -2431,6 +2432,7 @@ gcoOS_DebugTrace(
 #define gcvZONE_DEVICE          (1 << 10)
 #define gcvZONE_DATABASE        (1 << 11)
 #define gcvZONE_INTERRUPT       (1 << 12)
+#define gcvZONE_POWER           (1 << 13)
 
 /* User zones. */
 #define gcvZONE_HAL             (1 << 3)
@@ -3645,6 +3647,7 @@ gckOS_DebugStatus2Name(
 #   define gcmDEBUG_VERIFY_ARGUMENT(arg)
 #   define gcmkDEBUG_VERIFY_ARGUMENT(arg)
 #endif
+
 /*******************************************************************************
 **
 **  gcmVERIFY_ARGUMENT_RETURN
@@ -3702,6 +3705,7 @@ gcGetUserDebugOption(
     void
     );
 
+#if gcdHAS_ELLIPSES
 #define gcmUSER_DEBUG_MSG(level, ...) \
     do \
     { \
@@ -3713,6 +3717,11 @@ gcGetUserDebugOption(
 
 #define gcmUSER_DEBUG_ERROR_MSG(...)   gcmUSER_DEBUG_MSG(gcvDEBUG_MSG_ERROR, "Error: " __VA_ARGS__)
 #define gcmUSER_DEBUG_WARNING_MSG(...) gcmUSER_DEBUG_MSG(gcvDEBUG_MSG_WARNING, "Warring: " __VA_ARGS__)
+#else
+#define gcmUSER_DEBUG_MSG
+#define gcmUSER_DEBUG_ERROR_MSG
+#define gcmUSER_DEBUG_WARNING_MSG
+#endif
 
 #ifdef __cplusplus
 }

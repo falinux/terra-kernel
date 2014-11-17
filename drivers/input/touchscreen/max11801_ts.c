@@ -169,9 +169,16 @@ static int max11801_write_reg(struct i2c_client *client, int addr, int data)
 
 static void calibration_pointer(int *x_orig, int *y_orig)
 {
+	int  x;
 	int  y;
+
+#if 0
 	y = MAX11801_MAX_Y - *y_orig;
 	*y_orig = y;
+#else   // [FALINUX]
+	x = MAX11801_MAX_X - *x_orig;
+	*x_orig = x;
+#endif	
 }
 
 static irqreturn_t max11801_ts_interrupt(int irq, void *dev_id)
@@ -237,7 +244,9 @@ out:
 return IRQ_HANDLED;
 		}
 	else if (max11801_workmode == 1) {
-		if (status & (MAX11801_EDGE_INT)) {
+		// [FALINUX]
+//		if (status & （MAX11801_EDGE_INT))  {
+		if (status & (1)) {
 				status = read_register(data->client, GENERNAL_STATUS_REG);
 
 				/* X = panel setup*/
@@ -338,7 +347,9 @@ static void __devinit max11801_ts_phy_init(struct max11801_data *data)
 		/* Delay initial=1ms, Sampling time 2us ,Averaging sample depth 2 samples, Resolution 12bit */
 		max11801_write_reg(client, AUX_MESURE_CONF_REG, 0x76);
 		/* Use edge interrupt with direct conversion mode  */
-		max11801_write_reg(client, GENERNAL_CONF_REG, 0xf3);
+		// [FALINUX]
+//		max11801_write_reg(client, GENERNAL_CONF_REG, 0xf3);    // 0xf4
+		max11801_write_reg(client, GENERNAL_CONF_REG, 0xf4);    // 0xf4
 	}
 }
 
@@ -356,7 +367,10 @@ static int __devinit max11801_ts_probe(struct i2c_client *client,
 		error = -ENOMEM;
 		goto err_free_mem;
 	}
-	max11801_workmode = *(int *)(client->dev).platform_data;
+	// [FALINUX]
+//	max11801_workmode = *(int *)(client->dev).platform_data;
+	max11801_workmode = 0;
+
 	data->client = client;
 	data->input_dev = input_dev;
 

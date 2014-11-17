@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2004-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -70,7 +70,6 @@
 #endif
 #define	DMA_ADDR_INVALID	(~(dma_addr_t)0)
 DEFINE_MUTEX(udc_resume_mutex);
-extern void usb_debounce_id_vbus(void);
 static const char driver_name[] = "fsl-usb2-udc";
 static const char driver_desc[] = DRIVER_DESC;
 
@@ -562,6 +561,8 @@ static void dr_controller_stop(struct fsl_udc *udc)
 	tmp &= ~USB_CMD_RUN_STOP;
 	fsl_writel(tmp, &dr_regs->usbcmd);
 
+	/* disable pulldown dp and dm */
+	dr_discharge_line(udc->pdata, true);
 	return;
 }
 
@@ -958,11 +959,8 @@ static struct ep_td_struct *fsl_build_dtd(struct fsl_req *req, unsigned *length,
 			(unsigned)EP_MAX_LENGTH_TRANSFER);
 	if (NEED_IRAM(req->ep))
 		*length = min(*length, g_iram_size);
-#ifdef CONFIG_FSL_UTP
+
 	dtd = dma_pool_alloc_nonbufferable(udc_controller->td_pool, GFP_ATOMIC, dma);
-#else
-	dtd = dma_pool_alloc(udc_controller->td_pool, GFP_ATOMIC, dma);
-#endif
 	if (dtd == NULL)
 		return dtd;
 
@@ -1550,6 +1548,19 @@ static void ch9setaddress(struct fsl_udc *udc, u16 value, u16 index, u16 length)
 	udc->device_address = (u8) value;
 	/* Update usb state */
 	udc->usb_state = USB_STATE_ADDRESS;
+
+	/* for USB CV 3.0 test, the gap between the ACK of the set_address
+	 * and the subsequently setup packet may be very little, say 500us,
+	 * and if the latency we handle the ep completion is greater than
+	 * this gap, there is no response to the subsequent setup packet.
+	 * It will cause the CV test fail */
+	/* There is another way to set address, we can set the bit 24 to
+	 * 1 to make IC set this address instead of SW, it is more fast
+	 * and safe than SW way */
+	fsl_writel(udc->device_address << USB_DEVICE_ADDRESS_BIT_POS |
+			1 << USB_DEVICE_ADDRESS_ADV_BIT_POS,
+			&dr_regs->deviceaddr);
+
 	/* Status phase */
 	if (ep0_prime_status(udc, EP_DIR_IN))
 		ep0stall(udc);
@@ -1695,6 +1706,10 @@ static void setup_received_irq(struct fsl_udc *udc,
 				else if (setup->bRequest ==
 					 USB_DEVICE_A_ALT_HNP_SUPPORT)
 					udc->gadget.a_alt_hnp_support = 1;
+				else
+					break;
+			} else {
+				break;
 			}
 			rc = 0;
 		} else
@@ -1758,13 +1773,6 @@ static void setup_received_irq(struct fsl_udc *udc,
 static void ep0_req_complete(struct fsl_udc *udc, struct fsl_ep *ep0,
 		struct fsl_req *req)
 {
-	if (udc->usb_state == USB_STATE_ADDRESS) {
-		/* Set the new address */
-		u32 new_address = (u32) udc->device_address;
-		fsl_writel(new_address << USB_DEVICE_ADDRESS_BIT_POS,
-				&dr_regs->deviceaddr);
-	}
-
 	done(ep0, req, 0);
 }
 
@@ -2509,6 +2517,7 @@ int usb_gadget_unregister_driver(struct usb_gadget_driver *driver)
 
 	dr_phy_low_power_mode(udc_controller, true);
 
+	dr_clk_gate(false);
 	printk(KERN_INFO "unregistered gadget driver '%s'\r\n",
 	       driver->driver.name);
 	return 0;
@@ -2901,6 +2910,7 @@ static void fsl_udc_release(struct device *dev)
 	dma_free_coherent(dev, udc_controller->ep_qh_size,
 			udc_controller->ep_qh, udc_controller->ep_qh_dma);
 	kfree(udc_controller);
+	udc_controller = NULL;
 }
 
 /******************************************************************
@@ -3064,6 +3074,9 @@ static int __devinit fsl_udc_probe(struct platform_device *pdev)
 		ret = -ENODEV;
 		goto err2a;
 	}
+	pdata->lowpower = false;
+
+	spin_lock_init(&pdata->lock);
 
 	/* Due to mx35/mx25's phy's bug */
 	reset_phy();
@@ -3210,7 +3223,6 @@ static int __devinit fsl_udc_probe(struct platform_device *pdev)
 	udc_controller->charger.enable = false;
 #endif
 
-	spin_lock_init(&pdata->lock);
 	return 0;
 
 err4:
@@ -3218,6 +3230,7 @@ err4:
 err3:
 	free_irq(udc_controller->irq, udc_controller);
 err2:
+	dr_phy_low_power_mode(udc_controller, true);
 	if (pdata->exit)
 		pdata->exit(pdata->pdev);
 err2a:
@@ -3234,19 +3247,27 @@ err1a:
 /* Driver removal function
  * Free resources and finish pending transactions
  */
-static int __exit fsl_udc_remove(struct platform_device *pdev)
+static int  fsl_udc_remove(struct platform_device *pdev)
 {
 	struct fsl_usb2_platform_data *pdata = pdev->dev.platform_data;
-
+	u32 temp;
 	DECLARE_COMPLETION(done);
 
 	if (!udc_controller)
 		return -ENODEV;
 	udc_controller->done = &done;
 	/* open USB PHY clock */
-	if (udc_controller->stopped)
-		dr_clk_gate(true);
+	dr_clk_gate(true);
 
+	/* disable wake up and otgsc interrupt for safely remove udc driver*/
+	temp = fsl_readl(&dr_regs->otgsc);
+	temp &= ~(0x7f << 24);
+	fsl_writel(temp, &dr_regs->otgsc);
+	dr_wake_up_enable(udc_controller, false);
+
+	dr_discharge_line(pdata, true);
+
+	dr_clk_gate(false);
 	/* DR has been stopped in usb_gadget_unregister_driver() */
 	remove_proc_file();
 
@@ -3278,19 +3299,15 @@ static int __exit fsl_udc_remove(struct platform_device *pdev)
 	release_mem_region(res->start, resource_size(res));
 }
 #endif
-
 	device_unregister(&udc_controller->gadget.dev);
 	/* free udc --wait for the release() finished */
 	wait_for_completion(&done);
+
 	/*
-	 * do platform specific un-initialization:
-	 * release iomux pins, etc.
+	 * do platform specific un-initialization
 	 */
 	if (pdata->exit)
 		pdata->exit(pdata->pdev);
-
-	if (udc_controller->stopped)
-		dr_clk_gate(false);
 
 	return 0;
 }
@@ -3323,10 +3340,13 @@ static int udc_suspend(struct fsl_udc *udc)
 	 * charge using usb
 	 */
 	if (pdata->pmflags == 0) {
-		if (!udc_can_wakeup_system())
+		if (!udc_can_wakeup_system()) {
 			dr_wake_up_enable(udc, false);
-		else
+		} else {
+			if (pdata->platform_phy_power_on)
+				pdata->platform_phy_power_on();
 			dr_wake_up_enable(udc, true);
+		}
 	}
 
 	/*
@@ -3428,7 +3448,6 @@ static int fsl_udc_resume(struct platform_device *pdev)
 		u32 temp;
 		if (udc_controller->stopped)
 			dr_clk_gate(true);
-		usb_debounce_id_vbus();
 		if (fsl_readl(&dr_regs->otgsc) & OTGSC_STS_USB_ID) {
 			temp = fsl_readl(&dr_regs->otgsc);
 			/* if b_session_irq_en is cleared by otg */
@@ -3475,7 +3494,6 @@ static int fsl_udc_resume(struct platform_device *pdev)
 			dr_clk_gate(true);
 		dr_wake_up_enable(udc_controller, false);
 		dr_phy_low_power_mode(udc_controller, false);
-		usb_debounce_id_vbus();
 		/* if in host mode, we need to do nothing */
 		if ((fsl_readl(&dr_regs->otgsc) & OTGSC_STS_USB_ID) == 0) {
 			dr_phy_low_power_mode(udc_controller, true);
@@ -3515,7 +3533,7 @@ end:
 --------------------------------------------------------------------------*/
 
 static struct platform_driver udc_driver = {
-	.remove  = __exit_p(fsl_udc_remove),
+	.remove  = fsl_udc_remove,
 	/* these suspend and resume are not usb suspend and resume */
 	.suspend = fsl_udc_suspend,
 	.resume  = fsl_udc_resume,

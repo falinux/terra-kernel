@@ -75,13 +75,14 @@ static int sp_probe(struct platform_device *pdev)
 	struct resource *res_mem, *res_irq;
 	struct sja1000_platform_data *pdata;
 
+    printk(KERN_ALERT"sja1000 probe enter\n");
+
 	pdata = pdev->dev.platform_data;
 	if (!pdata) {
 		dev_err(&pdev->dev, "No platform data provided!\n");
 		err = -ENODEV;
 		goto exit;
 	}
-
 	res_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	res_irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
 	if (!res_mem || !res_irq) {
@@ -94,13 +95,11 @@ static int sp_probe(struct platform_device *pdev)
 		err = -EBUSY;
 		goto exit;
 	}
-
 	addr = ioremap_nocache(res_mem->start, resource_size(res_mem));
 	if (!addr) {
 		err = -ENOMEM;
 		goto exit_release;
 	}
-
 	dev = alloc_sja1000dev(0);
 	if (!dev) {
 		err = -ENOMEM;
@@ -131,7 +130,6 @@ static int sp_probe(struct platform_device *pdev)
 		priv->write_reg = sp_write_reg8;
 		break;
 	}
-
 	dev_set_drvdata(&pdev->dev, dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
 
@@ -141,7 +139,6 @@ static int sp_probe(struct platform_device *pdev)
 			DRV_NAME, err);
 		goto exit_free;
 	}
-
 	dev_info(&pdev->dev, "%s device registered (reg_base=%p, irq=%d)\n",
 		 DRV_NAME, priv->reg_base, dev->irq);
 	return 0;

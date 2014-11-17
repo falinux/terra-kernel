@@ -5,7 +5,7 @@
  *
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
  *
- * Copyright (C) 2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2013 Freescale Semiconductor, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -2379,9 +2379,9 @@ static int sysclk_event(struct snd_soc_dapm_widget *w,
 		break;
 
 	case SND_SOC_DAPM_POST_PMD:
-		if (fll)
-			snd_soc_update_bits(codec, WM8962_FLL_CONTROL_1,
-					    WM8962_FLL_ENA, 0);
+		/* After Power-down, close FLL if FLL-enabled */
+		snd_soc_update_bits(codec, WM8962_FLL_CONTROL_1,
+				WM8962_FLL_ENA, 0);
 		break;
 
 	default:
@@ -3461,6 +3461,9 @@ static int wm8962_set_fll(struct snd_soc_codec *codec, int fll_id, int source,
 	if (fll_div.theta || fll_div.lambda)
 		fll1 |= WM8962_FLL_FRAC;
 
+	/* Stop the FLL while we reconfigure */
+	snd_soc_update_bits(codec, WM8962_FLL_CONTROL_1, WM8962_FLL_ENA, 0);
+
 	snd_soc_update_bits(codec, WM8962_FLL_CONTROL_2,
 			    WM8962_FLL_OUTDIV_MASK |
 			    WM8962_FLL_REFCLK_DIV_MASK,
@@ -4101,10 +4104,6 @@ static int wm8962_probe(struct snd_soc_codec *codec)
 			    WM8962_SPKOUTL_VOL_MASK, 0x72);
 	snd_soc_update_bits(codec, WM8962_SPKOUTR_VOLUME,
 			    WM8962_SPKOUTR_VOL_MASK, 0x72);
-	snd_soc_update_bits(codec, WM8962_LEFT_DAC_VOLUME,
-			    WM8962_DACL_VOL_MASK, 0xd8);
-	snd_soc_update_bits(codec, WM8962_RIGHT_DAC_VOLUME,
-			    WM8962_DACR_VOL_MASK, 0xd8);
 
 	snd_soc_update_bits(codec, WM8962_LEFT_INPUT_VOLUME,
 			    WM8962_INL_VOL_MASK, 0x3f);
@@ -4112,7 +4111,7 @@ static int wm8962_probe(struct snd_soc_codec *codec)
 			    WM8962_INR_VOL_MASK, 0x3f);
 	snd_soc_update_bits(codec, WM8962_LEFT_ADC_VOLUME,
 			    WM8962_ADCL_VOL_MASK, 0xd8);
-	snd_soc_update_bits(codec, WM8962_LEFT_ADC_VOLUME,
+	snd_soc_update_bits(codec, WM8962_RIGHT_ADC_VOLUME,
 			    WM8962_ADCR_VOL_MASK, 0xd8);
 	snd_soc_update_bits(codec, WM8962_RIGHT_INPUT_MIXER_VOLUME,
 			    WM8962_IN3R_MIXINR_VOL_MASK, 0x7);

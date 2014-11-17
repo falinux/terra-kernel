@@ -117,7 +117,6 @@ static void set_reset_mode(struct net_device *dev)
 
 	/* disable interrupts */
 	priv->write_reg(priv, REG_IER, IRQ_OFF);
-
 	for (i = 0; i < 100; i++) {
 		/* check reset bit */
 		if (status & MOD_RM) {
@@ -128,6 +127,7 @@ static void set_reset_mode(struct net_device *dev)
 		priv->write_reg(priv, REG_MOD, MOD_RM);	/* reset chip */
 		udelay(10);
 		status = priv->read_reg(priv, REG_MOD);
+	//	printk(KERN_ALERT"reset mode status %02X\n", status);
 	}
 
 	dev_err(dev->dev.parent, "setting SJA1000 into reset mode failed!\n");
@@ -138,7 +138,7 @@ static void set_normal_mode(struct net_device *dev)
 	struct sja1000_priv *priv = netdev_priv(dev);
 	unsigned char status = priv->read_reg(priv, REG_MOD);
 	int i;
-
+		
 	for (i = 0; i < 100; i++) {
 		/* check reset bit */
 		if ((status & MOD_RM) == 0) {
@@ -153,9 +153,11 @@ static void set_normal_mode(struct net_device *dev)
 		}
 
 		/* set chip to normal mode */
-		priv->write_reg(priv, REG_MOD, 0x00);
-		udelay(10);
+//		priv->write_reg(priv, REG_MOD, 0x00);
+    	priv->write_reg(priv, REG_MOD, 0x04);	// [FALINUX]
+		udelay(10);	
 		status = priv->read_reg(priv, REG_MOD);
+		printk(KERN_ALERT"sja1000_platform sja1000_platform.0: normal mode REG_MOD=0x%02X\n", status);
 	}
 
 	dev_err(dev->dev.parent, "setting SJA1000 into normal mode failed!\n");
@@ -256,6 +258,9 @@ static void chipset_init(struct net_device *dev)
 	priv->write_reg(priv, REG_ACCM1, 0xFF);
 	priv->write_reg(priv, REG_ACCM2, 0xFF);
 	priv->write_reg(priv, REG_ACCM3, 0xFF);
+
+	// [FALINUX] ERROR WARNING LIMIT REGISTER (Default :96)
+	priv->write_reg(priv, REG_EWL, 0xFF);	// 255
 
 	priv->write_reg(priv, REG_OCR, priv->ocr | OCR_MODE_NORMAL);
 }
@@ -447,27 +452,54 @@ static int sja1000_err(struct net_device *dev, uint8_t isrc, uint8_t status)
 		cf->data[0] = alc & 0x1f;
 	}
 
-	if (state != priv->can.state && (state == CAN_STATE_ERROR_WARNING ||
-					 state == CAN_STATE_ERROR_PASSIVE)) {
+//  [FALINUX]
+//	if (state != priv->can.state && (state == CAN_STATE_ERROR_WARNING ||
+//									 state == CAN_STATE_ERROR_PASSIVE)) {
+//		uint8_t rxerr = priv->read_reg(priv, REG_RXERR);
+//		uint8_t txerr = priv->read_reg(priv, REG_TXERR);
+//		cf->can_id |= CAN_ERR_CRTL;
+//		if (state == CAN_STATE_ERROR_WARNING) {
+//			priv->can.can_stats.error_warning++;
+//			cf->data[1] = (txerr > rxerr) ?
+//				CAN_ERR_CRTL_TX_WARNING :
+//				CAN_ERR_CRTL_RX_WARNING;
+//		} else {
+//			priv->can.can_stats.error_passive++;
+//			cf->data[1] = (txerr > rxerr) ?
+//				CAN_ERR_CRTL_TX_PASSIVE :
+//				CAN_ERR_CRTL_RX_PASSIVE;
+//		}
+//		cf->data[6] = txerr;
+//		cf->data[7] = rxerr;
+//	}
+//
+//  [FALINUX]
+	if (state != priv->can.state) {
 		uint8_t rxerr = priv->read_reg(priv, REG_RXERR);
 		uint8_t txerr = priv->read_reg(priv, REG_TXERR);
 		cf->can_id |= CAN_ERR_CRTL;
-		if (state == CAN_STATE_ERROR_WARNING) {
-			priv->can.can_stats.error_warning++;
-			cf->data[1] = (txerr > rxerr) ?
-				CAN_ERR_CRTL_TX_WARNING :
-				CAN_ERR_CRTL_RX_WARNING;
-		} else {
-			priv->can.can_stats.error_passive++;
-			cf->data[1] = (txerr > rxerr) ?
-				CAN_ERR_CRTL_TX_PASSIVE :
-				CAN_ERR_CRTL_RX_PASSIVE;
+		switch (state) {
+			case CAN_STATE_ERROR_ACTIVE:
+				cf->data[1] = CAN_ERR_CRTL_ACTIVE;
+				break;
+			case CAN_STATE_ERROR_WARNING:
+				priv->can.can_stats.error_warning++;
+				cf->data[1] = (txerr > rxerr) ? CAN_ERR_CRTL_TX_WARNING : CAN_ERR_CRTL_RX_WARNING;
+				break;
+			case CAN_STATE_ERROR_PASSIVE:
+				priv->can.can_stats.error_passive++;
+				cf->data[1] = (txerr > rxerr) ? CAN_ERR_CRTL_TX_PASSIVE : CAN_ERR_CRTL_RX_PASSIVE;
+				break;
+			default:
+				break;
 		}
 		cf->data[6] = txerr;
 		cf->data[7] = rxerr;
+		priv->can.state = state;
 	}
 
-	priv->can.state = state;
+//  [FALINUX]
+//	priv->can.state = state;
 
 	netif_rx(skb);
 
@@ -541,12 +573,12 @@ static int sja1000_open(struct net_device *dev)
 	/* common open */
 	err = open_candev(dev);
 	if (err)
-		return err;
+	    return err;
 
 	/* register interrupt handler, if not done by the device driver */
 	if (!(priv->flags & SJA1000_CUSTOM_IRQ_HANDLER)) {
-		err = request_irq(dev->irq, sja1000_interrupt, priv->irq_flags,
-				  dev->name, (void *)dev);
+//		err = request_irq(dev->irq, sja1000_interrupt, priv->irq_flags, dev->name, (void *)dev);
+ 		err = request_irq(dev->irq, sja1000_interrupt, IRQF_SHARED | IRQF_TRIGGER_LOW, dev->name, dev);		
 		if (err) {
 			close_candev(dev);
 			return -EAGAIN;
@@ -645,7 +677,6 @@ EXPORT_SYMBOL_GPL(unregister_sja1000dev);
 static __init int sja1000_init(void)
 {
 	printk(KERN_INFO "%s CAN netdevice driver\n", DRV_NAME);
-
 	return 0;
 }
 

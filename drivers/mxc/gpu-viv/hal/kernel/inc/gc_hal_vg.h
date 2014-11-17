@@ -1,6 +1,6 @@
 /****************************************************************************
 *
-*    Copyright (C) 2005 - 2012 by Vivante Corp.
+*    Copyright (C) 2005 - 2013 by Vivante Corp.
 *
 *    This program is free software; you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
@@ -17,9 +17,6 @@
 *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 *
 *****************************************************************************/
-
-
-
 
 
 #ifndef __gc_hal_vg_h_
@@ -555,6 +552,12 @@ gckVGHARDWARE_QueryPowerManagementState(
     );
 
 gceSTATUS
+gckVGHARDWARE_SetPowerManagement(
+    IN gckVGHARDWARE Hardware,
+    IN gctBOOL PowerManagement
+    );
+
+gceSTATUS
 gckVGHARDWARE_SetPowerOffTimeout(
     IN gckVGHARDWARE  Hardware,
     IN gctUINT32    Timeout
@@ -588,7 +591,7 @@ typedef struct _gcsCMDBUFFER
     /* The user sets this to the node of the container buffer whitin which
        this particular command buffer resides. The kernel sets this to the
        node of the internally allocated buffer. */
-    gcuVIDMEM_NODE_PTR          node;
+    gctUINT64                   node;
 
     /* Command buffer hardware address. */
     gctUINT32                   address;
@@ -893,6 +896,12 @@ gckVGMMU_SetPage(
    IN gckVGMMU Mmu,
    IN gctUINT32 PageAddress,
    IN gctUINT32 *PageEntry
+   );
+
+/* Flush MMU */
+gceSTATUS
+gckVGMMU_Flush(
+   IN gckVGMMU Mmu
    );
 
 #endif /* gcdENABLE_VG */

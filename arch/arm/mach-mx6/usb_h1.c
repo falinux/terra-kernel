@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -90,6 +90,13 @@ static void usbh1_internal_phy_clock_gate(bool on)
 	}
 }
 
+static void usbh1_platform_phy_power_on(void)
+{
+	void __iomem *anatop_base_addr = MX6_IO_ADDRESS(ANATOP_BASE_ADDR);
+	__raw_writel(BM_ANADIG_ANA_MISC0_STOP_MODE_CONFIG,
+				anatop_base_addr + HW_ANADIG_ANA_MISC0_SET);
+}
+
 static int usb_phy_enable(struct fsl_usb2_platform_data *pdata)
 {
 	u32 tmp;
@@ -104,6 +111,16 @@ static int usb_phy_enable(struct fsl_usb2_platform_data *pdata)
 	UH1_USBCMD |= UCMD_RESET;
 	while ((UH1_USBCMD) & (UCMD_RESET))
 		;
+
+	/*
+	 * If the controller reset does not put the PHY be out of
+	 * low power mode, do it manually.
+	 */
+	if (UH1_PORTSC1 & PORTSC_PHCD) {
+		UH1_PORTSC1 &= ~PORTSC_PHCD;
+		mdelay(1);
+	}
+
 	/* Reset USBPHY module */
 	phy_ctrl = phy_reg + HW_USBPHY_CTRL;
 	tmp = __raw_readl(phy_ctrl);
@@ -134,7 +151,6 @@ static int fsl_usb_host_init_ext(struct platform_device *pdev)
 {
 	int ret;
 	struct clk *usb_clk;
-	void __iomem *anatop_base_addr = MX6_IO_ADDRESS(ANATOP_BASE_ADDR);
 	usb_clk = clk_get(NULL, "usboh3_clk");
 	clk_enable(usb_clk);
 	usb_oh3_clk = usb_clk;
@@ -142,29 +158,24 @@ static int fsl_usb_host_init_ext(struct platform_device *pdev)
 	ret = fsl_usb_host_init(pdev);
 	if (ret) {
 		printk(KERN_ERR "host1 init fails......\n");
+		clk_disable(usb_oh3_clk);
+		clk_put(usb_oh3_clk);
 		return ret;
 	}
 	usbh1_internal_phy_clock_gate(true);
 	usb_phy_enable(pdev->dev.platform_data);
-	usb_stop_mode_lock();
-	if (usb_stop_mode_refcount(true) == 1)
-		__raw_writel(BM_ANADIG_ANA_MISC0_STOP_MODE_CONFIG, anatop_base_addr + HW_ANADIG_ANA_MISC0_SET);
-	usb_stop_mode_unlock();
+
 	return 0;
 }
 
 static void fsl_usb_host_uninit_ext(struct platform_device *pdev)
 {
 	struct fsl_usb2_platform_data *pdata = pdev->dev.platform_data;
-	void __iomem *anatop_base_addr = MX6_IO_ADDRESS(ANATOP_BASE_ADDR);
+
 	fsl_usb_host_uninit(pdata);
 
-	clk_disable(usb_oh3_clk);
 	clk_put(usb_oh3_clk);
-	usb_stop_mode_lock();
-	if (usb_stop_mode_refcount(false) == 0)
-		__raw_writel(BM_ANADIG_ANA_MISC0_STOP_MODE_CONFIG, anatop_base_addr + HW_ANADIG_ANA_MISC0_CLR);
-	usb_stop_mode_unlock();
+
 }
 
 static void usbh1_clock_gate(bool on)
@@ -192,9 +203,14 @@ static void _wake_up_enable(struct fsl_usb2_platform_data *pdata, bool enable)
 				| BM_USBPHY_CTRL_ENAUTO_PWRON_PLL , phy_reg + HW_USBPHY_CTRL_SET);
 		USB_H1_CTRL |= (UCTRL_OWIE);
 	} else {
-		USB_H1_CTRL &= ~(UCTRL_OWIE);
 		__raw_writel(BM_USBPHY_CTRL_ENIDCHG_WKUP | BM_USBPHY_CTRL_ENVBUSCHG_WKUP
-				| BM_USBPHY_CTRL_ENDPDMCHG_WKUP, phy_reg + HW_USBPHY_CTRL_CLR);
+				| BM_USBPHY_CTRL_ENDPDMCHG_WKUP
+				| BM_USBPHY_CTRL_ENAUTOSET_USBCLKS
+				| BM_USBPHY_CTRL_ENAUTOCLR_PHY_PWD
+				| BM_USBPHY_CTRL_ENAUTOCLR_CLKGATE
+				| BM_USBPHY_CTRL_ENAUTOCLR_USBCLKGATE
+				| BM_USBPHY_CTRL_ENAUTO_PWRON_PLL , phy_reg + HW_USBPHY_CTRL_CLR);
+		USB_H1_CTRL &= ~(UCTRL_OWIE);
 		/* The interrupt must be disabled for at least 3
 		* cycles of the standby clock(32k Hz) , that is 0.094 ms*/
 		udelay(100);
@@ -244,7 +260,7 @@ static void usbh1_platform_rh_resume_swfix(struct fsl_usb2_platform_data *pdata)
 {
 	u32 index = 0;
 
-	if ((UOG_PORTSC1 & (PORTSC_PORT_SPEED_MASK)) != PORTSC_PORT_SPEED_HIGH)
+	if ((UH1_PORTSC1 & (PORTSC_PORT_SPEED_MASK)) != PORTSC_PORT_SPEED_HIGH)
 		return ;
 	while ((UH1_PORTSC1 & PORTSC_PORT_FORCE_RESUME)
 			&& (index < 1000)) {
@@ -277,7 +293,7 @@ static void usbh1_platform_rh_resume(struct fsl_usb2_platform_data *pdata)
 	/*for mx6sl ,we do not need any sw fix*/
 	if (cpu_is_mx6sl())
 		return ;
-	if ((UOG_PORTSC1 & (PORTSC_PORT_SPEED_MASK)) != PORTSC_PORT_SPEED_HIGH)
+	if ((UH1_PORTSC1 & (PORTSC_PORT_SPEED_MASK)) != PORTSC_PORT_SPEED_HIGH)
 		return ;
 	while ((UH1_PORTSC1 & PORTSC_PORT_FORCE_RESUME)
 			&& (index < 1000)) {
@@ -316,10 +332,12 @@ static void _phy_lowpower_suspend(struct fsl_usb2_platform_data *pdata, bool ena
 
 		usbh1_internal_phy_clock_gate(false);
 	} else {
-		if (UH1_PORTSC1 & PORTSC_PHCD) {
+		if (UH1_PORTSC1 & PORTSC_PHCD)
 			UH1_PORTSC1 &= ~PORTSC_PHCD;
-			mdelay(1);
-		}
+
+		/* Wait PHY clock stable */
+		mdelay(1);
+
 		usbh1_internal_phy_clock_gate(true);
 		tmp = (BM_USBPHY_PWD_TXPWDFS
 			| BM_USBPHY_PWD_TXPWDIBIAS
@@ -329,6 +347,13 @@ static void _phy_lowpower_suspend(struct fsl_usb2_platform_data *pdata, bool ena
 			| BM_USBPHY_PWD_RXPWDDIFF
 			| BM_USBPHY_PWD_RXPWDRX);
 		__raw_writel(tmp, phy_reg + HW_USBPHY_PWD_CLR);
+		/*
+		 * The PHY works at 32Khz clock when it is at low power mode,
+		 * it needs 10 clocks from 32Khz to normal work state, so
+		 * 500us is the safe value for PHY enters stable status
+		 * according to IC engineer.
+		 */
+		udelay(500);
 
 	}
 }
@@ -351,13 +376,16 @@ static void h1_wakeup_handler(struct fsl_usb2_platform_data *pdata)
 
 static void usbh1_wakeup_event_clear(void)
 {
-	void __iomem *phy_reg = MX6_IO_ADDRESS(USB_PHY1_BASE_ADDR);
-	u32 wakeup_irq_bits;
+	int wakeup_req = USB_H1_CTRL & UCTRL_OWIR;
 
-	wakeup_irq_bits = BM_USBPHY_CTRL_RESUME_IRQ | BM_USBPHY_CTRL_WAKEUP_IRQ;
-	if (__raw_readl(phy_reg + HW_USBPHY_CTRL) && wakeup_irq_bits) {
-		/* clear the wakeup interrupt status */
-		__raw_writel(wakeup_irq_bits, phy_reg + HW_USBPHY_CTRL_CLR);
+	if (wakeup_req != 0) {
+		printk(KERN_INFO "Unknown wakeup.(H1 OTGSC 0x%x)\n", UH1_OTGSC);
+		/* Disable OWIE to clear OWIR, wait 3 clock
+		 * cycles of standly clock(32KHz)
+		 */
+		USB_H1_CTRL &= ~UCTRL_OWIE;
+		udelay(100);
+		USB_H1_CTRL |= UCTRL_OWIE;
 	}
 }
 
@@ -374,6 +402,7 @@ static struct fsl_usb2_platform_data usbh1_config = {
 	.phy_lowpower_suspend = _phy_lowpower_suspend,
 	.is_wakeup_event = _is_usbh1_wakeup,
 	.wakeup_handler = h1_wakeup_handler,
+	.platform_phy_power_on = usbh1_platform_phy_power_on,
 	.transceiver = "utmi",
 	.phy_regs = USB_PHY1_BASE_ADDR,
 };
@@ -399,9 +428,8 @@ static int  __init mx6_usb_h1_init(void)
 	struct imx_mxc_ehci_data imx6sl_mxc_ehci_hs_data[] = {
 		imx_mxc_ehci_data_entry_single(MX6SL, 1, HS1)};
 
-	mx6_set_usb_host1_vbus_func(&mx6_set_usb_host1_vbus);
-	if (mx6_set_usb_host1_vbus)
-		mx6_set_usb_host1_vbus(true);
+	mx6_get_host1_vbus_func(&mx6_set_usb_host1_vbus);
+	usbh1_config.platform_driver_vbus = mx6_set_usb_host1_vbus;
 
 	/* Some phy and power's special controls for host1
 	 * 1. The external charger detector needs to be disabled
@@ -437,6 +465,7 @@ static int  __init mx6_usb_h1_init(void)
 		pdev_wakeup = imx6sl_add_fsl_usb2_hs_wakeup(1, &usbh1_wakeup_config);
 	else
 		pdev_wakeup = imx6q_add_fsl_usb2_hs_wakeup(1, &usbh1_wakeup_config);
+	platform_device_add(pdev);
 	((struct fsl_usb2_platform_data *)(pdev->dev.platform_data))->wakeup_pdata =
 		(struct fsl_usb2_wakeup_platform_data *)(pdev_wakeup->dev.platform_data);
 	return 0;
@@ -455,8 +484,6 @@ static void __exit mx6_usb_h1_exit(void)
 			| BM_ANADIG_USB2_PLL_480_CTRL_POWER \
 			| BM_ANADIG_USB2_PLL_480_CTRL_EN_USB_CLKS, \
 			anatop_base_addr + HW_ANADIG_USB2_PLL_480_CTRL_CLR);
-	if (mx6_set_usb_host1_vbus)
-		mx6_set_usb_host1_vbus(false);
 
 	return ;
 }

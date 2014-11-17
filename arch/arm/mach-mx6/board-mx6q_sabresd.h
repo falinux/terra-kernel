@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2012-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -30,7 +30,7 @@ static iomux_v3_cfg_t mx6q_sabresd_pads[] = {
 	/* CAN1  */
 	MX6Q_PAD_KEY_ROW2__HDMI_TX_CEC_LINE,
 	/* MX6Q_PAD_KEY_COL2__CAN1_TXCAN, */
-	MX6Q_PAD_GPIO_1__GPIO_1_1,		/* user defiend green led */
+	MX6Q_PAD_GPIO_1__WDOG2_WDOG_B,		/*WDOG_B to reset pmic*/
 	MX6Q_PAD_GPIO_2__GPIO_1_2,		/* user defined red led */
 	MX6Q_PAD_GPIO_7__GPIO_1_7,		/* NERR */
 
@@ -132,9 +132,8 @@ static iomux_v3_cfg_t mx6q_sabresd_pads[] = {
 	MX6Q_PAD_KEY_COL3__I2C2_SCL,
 	MX6Q_PAD_KEY_ROW3__I2C2_SDA,
 
-	/* I2C3 */
-	MX6Q_PAD_GPIO_3__I2C3_SCL,	/* GPIO1[3] */
-	MX6Q_PAD_GPIO_6__I2C3_SDA,
+	/*I2C3 */
+	MX6Q_PAD_GPIO_3__I2C3_SCL,
 
 	/* DISPLAY */
 	MX6Q_PAD_DI0_DISP_CLK__IPU1_DI0_DISP_CLK,

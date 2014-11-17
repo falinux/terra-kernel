@@ -1,6 +1,6 @@
 /****************************************************************************
 *
-*    Copyright (C) 2005 - 2012 by Vivante Corp.
+*    Copyright (C) 2005 - 2013 by Vivante Corp.
 *
 *    This program is free software; you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
@@ -17,8 +17,6 @@
 *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 *
 *****************************************************************************/
-
-
 
 
 #include "gc_hal_kernel_precomp.h"
@@ -1029,7 +1027,8 @@ gckVIDMEM_AllocateLinear(
     )
     {
         /* The left memory is for small memory.*/
-        gcmkONERROR(gcvSTATUS_OUT_OF_MEMORY);
+        status = gcvSTATUS_OUT_OF_MEMORY;
+        goto OnError;
     }
 #endif
 
@@ -1830,7 +1829,11 @@ gckVIDMEM_Lock(
 #endif
 
 #if gcdENABLE_VG
-                if (Kernel->core != gcvCORE_VG)
+                if (Kernel->core == gcvCORE_VG)
+                {
+                    gcmkONERROR(gckVGMMU_Flush(Kernel->vg->mmu));
+                }
+                else
 #endif
                 {
                     gcmkONERROR(gckMMU_Flush(Kernel->mmu));
@@ -2141,6 +2144,9 @@ gckVIDMEM_Unlock(
 
             if (!Node->Virtual.contiguous
             &&  (Node->Virtual.lockeds[Kernel->core] == 1)
+#if gcdENABLE_VG
+            && (Kernel->vg == gcvNULL)
+#endif
             )
             {
                 if (Type == gcvSURF_BITMAP)

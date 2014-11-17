@@ -1114,7 +1114,6 @@ mwifiex_ret_802_11_scan_get_tlv_ptrs(struct mwifiex_adapter *adapter,
 
 	dev_dbg(adapter->dev, "info: SCAN_RESP: tlv_buf_size = %d\n",
 						tlv_buf_size);
-
 	while (tlv_buf_left >= sizeof(struct mwifiex_ie_types_header)) {
 
 		tlv_type = le16_to_cpu(current_tlv->header.type);

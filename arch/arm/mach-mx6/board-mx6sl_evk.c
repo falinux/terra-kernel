@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2012-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -61,6 +61,7 @@
 #include <mach/iomux-mx6sl.h>
 #include <mach/imx-uart.h>
 #include <mach/viv_gpu.h>
+#include <mach/imx_rfkill.h>
 
 #include <asm/irq.h>
 #include <asm/setup.h>
@@ -77,6 +78,9 @@
 
 static int spdc_sel;
 static int max17135_regulator_init(struct max17135 *max17135);
+static void mx6sl_evk_suspend_enter(void);
+static void mx6sl_evk_suspend_exit(void);
+
 struct clk *extern_audio_root;
 
 extern char *gp_reg_id;
@@ -84,11 +88,69 @@ extern char *soc_reg_id;
 extern char *pu_reg_id;
 extern int __init mx6sl_evk_init_pfuze100(u32 int_gpio);
 
+static int csi_enabled;
+
+#define SXSDMAN_BLUETOOTH_ENABLE
+
+static iomux_v3_cfg_t mx6sl_brd_csi_enable_pads[] = {
+	MX6SL_PAD_EPDC_GDRL__CSI_MCLK,
+	MX6SL_PAD_EPDC_SDCE3__I2C3_SDA,
+	MX6SL_PAD_EPDC_SDCE2__I2C3_SCL,
+	MX6SL_PAD_EPDC_GDCLK__CSI_PIXCLK,
+	MX6SL_PAD_EPDC_GDSP__CSI_VSYNC,
+	MX6SL_PAD_EPDC_GDOE__CSI_HSYNC,
+	MX6SL_PAD_EPDC_SDLE__CSI_D_9,
+	MX6SL_PAD_EPDC_SDCLK__CSI_D_8,
+	MX6SL_PAD_EPDC_D7__CSI_D_7,
+	MX6SL_PAD_EPDC_D6__CSI_D_6,
+	MX6SL_PAD_EPDC_D5__CSI_D_5,
+	MX6SL_PAD_EPDC_D4__CSI_D_4,
+	MX6SL_PAD_EPDC_D3__CSI_D_3,
+	MX6SL_PAD_EPDC_D2__CSI_D_2,
+	MX6SL_PAD_EPDC_D1__CSI_D_1,
+	MX6SL_PAD_EPDC_D0__CSI_D_0,
+
+	MX6SL_PAD_EPDC_SDSHR__GPIO_1_26,	/* CMOS_RESET_B GPIO */
+	MX6SL_PAD_EPDC_SDOE__GPIO_1_25,		/* CMOS_PWDN GPIO */
+};
+
+#ifdef SXSDMAN_BLUETOOTH_ENABLE
+static iomux_v3_cfg_t mx6sl_uart4_pads[] = {
+	MX6SL_PAD_SD1_DAT4__UART4_RXD,
+	MX6SL_PAD_SD1_DAT5__UART4_TXD,
+	MX6SL_PAD_SD1_DAT6__UART4_RTS,
+	MX6SL_PAD_SD1_DAT7__UART4_CTS,
+	/* gpio for reset */
+	MX6SL_PAD_SD1_DAT0__GPIO_5_11,
+};
+#else
+/* uart2 pins */
+static iomux_v3_cfg_t mx6sl_uart2_pads[] = {
+	MX6SL_PAD_SD2_DAT5__UART2_TXD,
+	MX6SL_PAD_SD2_DAT4__UART2_RXD,
+	MX6SL_PAD_SD2_DAT6__UART2_RTS,
+	MX6SL_PAD_SD2_DAT7__UART2_CTS,
+};
+#endif
+
 enum sd_pad_mode {
 	SD_PAD_MODE_LOW_SPEED,
 	SD_PAD_MODE_MED_SPEED,
 	SD_PAD_MODE_HIGH_SPEED,
 };
+
+static const struct pm_platform_data mx6sl_evk_pm_data __initconst = {
+	.name		= "imx_pm",
+	.suspend_enter = mx6sl_evk_suspend_enter,
+	.suspend_exit = mx6sl_evk_suspend_exit,
+};
+
+static int __init csi_setup(char *__unused)
+{
+	csi_enabled = 1;
+	return 1;
+}
+__setup("csi", csi_setup);
 
 static int plt_sd_pad_change(unsigned int index, int clock)
 {
@@ -316,13 +378,13 @@ static struct platform_device max17135_sensor_device = {
 
 static struct max17135_platform_data max17135_pdata __initdata = {
 	.vneg_pwrup = 1,
-	.gvee_pwrup = 1,
-	.vpos_pwrup = 2,
-	.gvdd_pwrup = 1,
+	.gvee_pwrup = 2,
+	.vpos_pwrup = 10,
+	.gvdd_pwrup = 12,
 	.gvdd_pwrdn = 1,
 	.vpos_pwrdn = 2,
-	.gvee_pwrdn = 1,
-	.vneg_pwrdn = 1,
+	.gvee_pwrdn = 8,
+	.vneg_pwrdn = 10,
 	.gpio_pmic_pwrgood = MX6SL_BRD_EPDC_PWRSTAT,
 	.gpio_pmic_vcom_ctrl = MX6SL_BRD_EPDC_VCOM,
 	.gpio_pmic_wakeup = MX6SL_BRD_EPDC_PMIC_WAKE,
@@ -485,8 +547,8 @@ static int mxc_wm8962_init(void)
 
 	clk_set_parent(extern_audio_root, pll4);
 
-	rate = clk_round_rate(extern_audio_root, 26000000);
-	clk_set_rate(extern_audio_root, rate);
+	rate = 24000000;
+	clk_set_rate(extern_audio_root, 24000000);
 
 	wm8962_data.sysclk = rate;
 	/* set AUDMUX pads to 1.8v */
@@ -557,6 +619,115 @@ static int __init imx6q_init_audio(void)
 	return 0;
 }
 
+static int spdif_clk_set_rate(struct clk *clk, unsigned long rate)
+{
+	unsigned long rate_actual;
+	rate_actual = clk_round_rate(clk, rate);
+	clk_set_rate(clk, rate_actual);
+	return 0;
+}
+
+static struct mxc_spdif_platform_data mxc_spdif_data = {
+	.spdif_tx		= 1,
+	.spdif_rx		= 0,
+	.spdif_clk_44100	= 1,
+	.spdif_clk_48000	= -1,
+	.spdif_div_44100	= 23,
+	.spdif_clk_set_rate	= spdif_clk_set_rate,
+	.spdif_clk		= NULL,
+};
+
+int hdmi_enabled;
+static int __init hdmi_setup(char *__unused)
+{
+	hdmi_enabled = 1;
+	return 1;
+}
+__setup("hdmi", hdmi_setup);
+
+static iomux_v3_cfg_t mx6sl_sii902x_hdmi_pads_enabled[] = {
+	MX6SL_PAD_LCD_RESET__GPIO_2_19,
+	MX6SL_PAD_EPDC_PWRCTRL3__GPIO_2_10,
+};
+
+static int sii902x_get_pins(void)
+{
+	/* Sii902x HDMI controller */
+	mxc_iomux_v3_setup_multiple_pads(mx6sl_sii902x_hdmi_pads_enabled, \
+		ARRAY_SIZE(mx6sl_sii902x_hdmi_pads_enabled));
+
+	/* Reset Pin */
+	gpio_request(MX6_BRD_LCD_RESET, "disp0-reset");
+	gpio_direction_output(MX6_BRD_LCD_RESET, 1);
+
+	/* Interrupter pin GPIO */
+	gpio_request(MX6SL_BRD_EPDC_PWRCTRL3, "disp0-detect");
+	gpio_direction_input(MX6SL_BRD_EPDC_PWRCTRL3);
+       return 1;
+}
+
+static void sii902x_put_pins(void)
+{
+	gpio_free(MX6_BRD_LCD_RESET);
+	gpio_free(MX6SL_BRD_EPDC_PWRCTRL3);
+}
+
+static void sii902x_hdmi_reset(void)
+{
+	gpio_set_value(MX6_BRD_LCD_RESET, 0);
+	msleep(10);
+	gpio_set_value(MX6_BRD_LCD_RESET, 1);
+	msleep(10);
+}
+
+static struct fsl_mxc_lcd_platform_data sii902x_hdmi_data = {
+       .ipu_id = 0,
+       .disp_id = 0,
+       .reset = sii902x_hdmi_reset,
+       .get_pins = sii902x_get_pins,
+       .put_pins = sii902x_put_pins,
+};
+
+static void mx6sl_csi_io_init(void)
+{
+	mxc_iomux_v3_setup_multiple_pads(mx6sl_brd_csi_enable_pads,	\
+				ARRAY_SIZE(mx6sl_brd_csi_enable_pads));
+
+	/* Camera reset */
+	gpio_request(MX6SL_BRD_CSI_RST, "cam-reset");
+	gpio_direction_output(MX6SL_BRD_CSI_RST, 1);
+
+	/* Camera power down */
+	gpio_request(MX6SL_BRD_CSI_PWDN, "cam-pwdn");
+	gpio_direction_output(MX6SL_BRD_CSI_PWDN, 1);
+	msleep(5);
+	gpio_set_value(MX6SL_BRD_CSI_PWDN, 0);
+	msleep(5);
+	gpio_set_value(MX6SL_BRD_CSI_RST, 0);
+	msleep(1);
+	gpio_set_value(MX6SL_BRD_CSI_RST, 1);
+	msleep(5);
+	gpio_set_value(MX6SL_BRD_CSI_PWDN, 1);
+}
+
+static void mx6sl_csi_cam_powerdown(int powerdown)
+{
+	if (powerdown)
+		gpio_set_value(MX6SL_BRD_CSI_PWDN, 1);
+	else
+		gpio_set_value(MX6SL_BRD_CSI_PWDN, 0);
+
+	msleep(2);
+}
+
+static struct fsl_mxc_camera_platform_data camera_data = {
+	.mclk = 24000000,
+	.io_init = mx6sl_csi_io_init,
+	.pwdn = mx6sl_csi_cam_powerdown,
+	.core_regulator = "VGEN2_1V5",
+	.analog_regulator = "VGEN6_2V8",
+};
+
 static struct imxi2c_platform_data mx6_evk_i2c0_data = {
 	.bitrate = 100000,
 };
@@ -566,7 +737,7 @@ static struct imxi2c_platform_data mx6_evk_i2c1_data = {
 };
 
 static struct imxi2c_platform_data mx6_evk_i2c2_data = {
-	.bitrate = 400000,
+	.bitrate = 100000,
 };
 
 static struct i2c_board_info mxc_i2c0_board_info[] __initdata = {
@@ -586,22 +757,23 @@ static struct i2c_board_info mxc_i2c1_board_info[] __initdata = {
 		I2C_BOARD_INFO("wm8962", 0x1a),
 		.platform_data = &wm8962_config_data,
 	},
+	{
+		I2C_BOARD_INFO("sii902x", 0),
+		.platform_data = &sii902x_hdmi_data,
+		.irq = gpio_to_irq(MX6SL_BRD_EPDC_PWRCTRL3)
+	},
 };
 
 static struct i2c_board_info mxc_i2c2_board_info[] __initdata = {
 	{
+		I2C_BOARD_INFO("ov5640", 0x3c),
+		.platform_data = (void *)&camera_data,
 	},
 };
 
 static struct mxc_dvfs_platform_data mx6sl_evk_dvfscore_data = {
-#ifdef CONFIG_MX6_INTER_LDO_BYPASS
 	.reg_id			= "VDDCORE",
 	.soc_id			= "VDDSOC",
-#else
-	.reg_id			= "cpu_vddgp",
-	.soc_id			= "cpu_vddsoc",
-	.pu_id			= "cpu_vddvpu",
-#endif
 	.clk1_id		= "cpu_clk",
 	.clk2_id		= "gpc_dvfs_clk",
 	.gpc_cntr_offset	= MXC_GPC_CNTR_OFFSET,
@@ -628,6 +800,20 @@ static struct viv_gpu_platform_data imx6q_gpu_pdata __initdata = {
 };
 
 void __init early_console_setup(unsigned long base, struct clk *clk);
+
+#ifdef SXSDMAN_BLUETOOTH_ENABLE
+static const struct imxuart_platform_data mx6sl_evk_uart4_data __initconst = {
+	.flags      = IMXUART_HAVE_RTSCTS,
+	.dma_req_rx = MX6Q_DMA_REQ_UART4_RX,
+	.dma_req_tx = MX6Q_DMA_REQ_UART4_TX,
+};
+#else
+static const struct imxuart_platform_data mx6sl_evk_uart1_data __initconst = {
+	.flags      = IMXUART_HAVE_RTSCTS | IMXUART_SDMA,
+	.dma_req_rx = MX6Q_DMA_REQ_UART2_RX,
+	.dma_req_tx = MX6Q_DMA_REQ_UART2_TX,
+};
+#endif
 
 static inline void mx6_evk_init_uart(void)
 {
@@ -1069,6 +1255,14 @@ static void imx6_evk_usbotg_vbus(bool on)
 		gpio_set_value(MX6_BRD_USBOTG1_PWR, 0);
 }
 
+static void imx6_evk_usbh1_vbus(bool on)
+{
+	if (on)
+		gpio_set_value(MX6_BRD_USBOTG2_PWR, 1);
+	else
+		gpio_set_value(MX6_BRD_USBOTG2_PWR, 0);
+}
+
 static void __init mx6_evk_init_usb(void)
 {
 	int ret = 0;
@@ -1091,10 +1285,11 @@ static void __init mx6_evk_init_usb(void)
 		pr_err("failed to get GPIO MX6_BRD_USBOTG2_PWR:%d\n", ret);
 		return;
 	}
-	gpio_direction_output(MX6_BRD_USBOTG2_PWR, 1);
+	gpio_direction_output(MX6_BRD_USBOTG2_PWR, 0);
 
 	mx6_set_otghost_vbus_func(imx6_evk_usbotg_vbus);
-	mx6_usb_dr_init();
+	mx6_set_host1_vbus_func(imx6_evk_usbh1_vbus);
+
 #ifdef CONFIG_USB_EHCI_ARC_HSIC
 	mx6_usb_h2_init();
 #endif
@@ -1106,26 +1301,44 @@ static struct platform_pwm_backlight_data mx6_evk_pwm_backlight_data = {
 	.dft_brightness	= 128,
 	.pwm_period_ns	= 50000,
 };
-static struct fb_videomode video_modes[] = {
+static struct fb_videomode wvga_video_modes[] = {
 	{
 	 /* 800x480 @ 57 Hz , pixel clk @ 32MHz */
-	 "SEIKO-WVGA", 60, 800, 480, 29850, 99, 164, 33, 10, 10, 10,
+	 "SEIKO-WVGA", 60, 800, 480, 29850, 89, 164, 23, 10, 10, 10,
 	 FB_SYNC_CLK_LAT_FALL,
 	 FB_VMODE_NONINTERLACED,
 	 0,},
 };
 
-static struct mxc_fb_platform_data fb_data[] = {
+static struct mxc_fb_platform_data wvga_fb_data[] = {
 	{
 	 .interface_pix_fmt = V4L2_PIX_FMT_RGB24,
 	 .mode_str = "SEIKO-WVGA",
-	 .mode = video_modes,
-	 .num_modes = ARRAY_SIZE(video_modes),
+	 .mode = wvga_video_modes,
+	 .num_modes = ARRAY_SIZE(wvga_video_modes),
 	 },
 };
 
 static struct platform_device lcd_wvga_device = {
 	.name = "lcd_seiko",
+};
+
+static struct fb_videomode hdmi_video_modes[] = {
+	{
+	 /* 1920x1080 @ 60 Hz , pixel clk @ 148MHz */
+	 "sii9022x_1080p60", 60, 1920, 1080, 6734, 148, 88, 36, 4, 44, 5,
+	 FB_SYNC_CLK_LAT_FALL,
+	 FB_VMODE_NONINTERLACED,
+	 0,},
+};
+
+static struct mxc_fb_platform_data hdmi_fb_data[] = {
+	{
+	 .interface_pix_fmt = V4L2_PIX_FMT_RGB24,
+	 .mode_str = "1920x1080M@60",
+	 .mode = hdmi_video_modes,
+	 .num_modes = ARRAY_SIZE(hdmi_video_modes),
+	 },
 };
 
 static int mx6sl_evk_keymap[] = {
@@ -1201,6 +1414,11 @@ static struct platform_device evk_max8903_charger_1 = {
 	},
 };
 
+/*! Device Definition for csi v4l2 device */
+static struct platform_device csi_v4l2_devices = {
+	.name = "csi_v4l2",
+	.id = 0,
+};
 
 #define SNVS_LPCR 0x38
 static void mx6_snvs_poweroff(void)
@@ -1213,25 +1431,106 @@ static void mx6_snvs_poweroff(void)
 	writel(value | 0x60, mx6_snvs_base + SNVS_LPCR);
 }
 
+#ifdef SXSDMAN_BLUETOOTH_ENABLE
+static int uart4_enabled;
+static int __init uart4_setup(char * __unused)
+{
+	uart4_enabled = 1;
+	return 1;
+}
+__setup("bluetooth", uart4_setup);
+
+static void __init uart4_init(void)
+{
+	mxc_iomux_v3_setup_multiple_pads(mx6sl_uart4_pads,
+					ARRAY_SIZE(mx6sl_uart4_pads));
+	imx6sl_add_imx_uart(3, &mx6sl_evk_uart4_data);
+}
+#else
+static int uart2_enabled;
+static int __init uart2_setup(char * __unused)
+{
+	uart2_enabled = 1;
+	return 1;
+}
+__setup("bluetooth", uart2_setup);
+
+static void __init uart2_init(void)
+{
+	mxc_iomux_v3_setup_multiple_pads(mx6sl_uart2_pads,
+					ARRAY_SIZE(mx6sl_uart2_pads));
+	imx6sl_add_imx_uart(1, &mx6sl_evk_uart1_data);
+}
+#endif
+
+static void mx6sl_evk_bt_reset(void)
+{
+	gpio_request(MX6SL_BRD_BT_RESET, "bt-reset");
+	gpio_direction_output(MX6SL_BRD_BT_RESET, 0);
+	/* pull down reset pin at least >5ms */
+	mdelay(6);
+	/* pull up after power supply BT */
+	gpio_set_value(MX6SL_BRD_BT_RESET, 1);
+	gpio_free(MX6SL_BRD_BT_RESET);
+}
+
+static int mx6sl_evk_bt_power_change(int status)
+{
+	if (status)
+		mx6sl_evk_bt_reset();
+	return 0;
+}
+
+static struct platform_device mxc_bt_rfkill = {
+	.name = "mxc_bt_rfkill",
+};
+
+static struct imx_bt_rfkill_platform_data mxc_bt_rfkill_data = {
+	.power_change = mx6sl_evk_bt_power_change,
+};
+
+static void mx6sl_evk_suspend_enter()
+{
+	iomux_v3_cfg_t *p = suspend_enter_pads;
+	int i;
+
+	/* Set PADCTRL to 0 for all IOMUX. */
+	for (i = 0; i < ARRAY_SIZE(suspend_enter_pads); i++) {
+		suspend_exit_pads[i] = *p;
+		*p &= ~MUX_PAD_CTRL_MASK;
+		/* Enable the Pull down and the keeper
+		  * Set the drive strength to 0.
+		  */
+		*p |= ((u64)0x3000 << MUX_PAD_CTRL_SHIFT);
+		p++;
+	}
+	mxc_iomux_v3_get_multiple_pads(suspend_exit_pads,
+			ARRAY_SIZE(suspend_exit_pads));
+	mxc_iomux_v3_setup_multiple_pads(suspend_enter_pads,
+			ARRAY_SIZE(suspend_enter_pads));
+
+}
+
+static void mx6sl_evk_suspend_exit()
+{
+	mxc_iomux_v3_setup_multiple_pads(suspend_exit_pads,
+			ARRAY_SIZE(suspend_exit_pads));
+}
+
 /*!
  * Board specific initialization.
  */
 static void __init mx6_evk_init(void)
 {
+	u32 i;
+
 	mxc_iomux_v3_setup_multiple_pads(mx6sl_brd_pads,
 					ARRAY_SIZE(mx6sl_brd_pads));
 
 	elan_ts_init();
 
-#ifdef CONFIG_MX6_INTER_LDO_BYPASS
 	gp_reg_id = mx6sl_evk_dvfscore_data.reg_id;
 	soc_reg_id = mx6sl_evk_dvfscore_data.soc_id;
-#else
-	gp_reg_id = mx6sl_evk_dvfscore_data.reg_id;
-	soc_reg_id = mx6sl_evk_dvfscore_data.soc_id;
-	pu_reg_id = mx6sl_evk_dvfscore_data.pu_id;
-	mx6_cpu_regulator_init();
-#endif
 
 	imx6q_add_imx_snvs_rtc();
 
@@ -1239,11 +1538,26 @@ static void __init mx6_evk_init(void)
 	imx6q_add_imx_i2c(1, &mx6_evk_i2c1_data);
 	i2c_register_board_info(0, mxc_i2c0_board_info,
 			ARRAY_SIZE(mxc_i2c0_board_info));
+
+	/*  setting sii902x address when hdmi enabled */
+	if (hdmi_enabled) {
+		for (i = 0; i < ARRAY_SIZE(mxc_i2c1_board_info); i++) {
+			if (!strcmp(mxc_i2c1_board_info[i].type, "sii902x")) {
+				mxc_i2c1_board_info[i].addr = 0x39;
+				break;
+			}
+		}
+	}
+
 	i2c_register_board_info(1, mxc_i2c1_board_info,
 			ARRAY_SIZE(mxc_i2c1_board_info));
-	imx6q_add_imx_i2c(2, &mx6_evk_i2c2_data);
-	i2c_register_board_info(2, mxc_i2c2_board_info,
-			ARRAY_SIZE(mxc_i2c2_board_info));
+	/* only camera on I2C3, that's why we can do so */
+	if (csi_enabled == 1) {
+		mxc_register_device(&csi_v4l2_devices, NULL);
+		imx6q_add_imx_i2c(2, &mx6_evk_i2c2_data);
+		i2c_register_board_info(2, mxc_i2c2_board_info,
+				ARRAY_SIZE(mxc_i2c2_board_info));
+	}
 
 	/* SPI */
 	imx6q_add_ecspi(0, &mx6_evk_spi_data);
@@ -1271,23 +1585,43 @@ static void __init mx6_evk_init(void)
 	imx6q_add_otp();
 	imx6q_add_mxc_pwm(0);
 	imx6q_add_mxc_pwm_backlight(0, &mx6_evk_pwm_backlight_data);
-	imx6dl_add_imx_elcdif(&fb_data[0]);
 
-	gpio_request(MX6_BRD_LCD_PWR_EN, "elcdif-power-on");
-	gpio_direction_output(MX6_BRD_LCD_PWR_EN, 1);
-	mxc_register_device(&lcd_wvga_device, NULL);
+	if (hdmi_enabled) {
+		imx6dl_add_imx_elcdif(&hdmi_fb_data[0]);
+	} else {
+		imx6dl_add_imx_elcdif(&wvga_fb_data[0]);
+
+		gpio_request(MX6_BRD_LCD_PWR_EN, "elcdif-power-on");
+		gpio_direction_output(MX6_BRD_LCD_PWR_EN, 1);
+		mxc_register_device(&lcd_wvga_device, NULL);
+	}
 
 	imx6dl_add_imx_pxp();
 	imx6dl_add_imx_pxp_client();
 	mxc_register_device(&max17135_sensor_device, NULL);
 	setup_spdc();
-	if (!spdc_sel)
-		imx6dl_add_imx_epdc(&epdc_data);
-	else
-		imx6sl_add_imx_spdc(&spdc_data);
+	if (csi_enabled) {
+		imx6sl_add_fsl_csi();
+	} else  {
+		if (!spdc_sel)
+			imx6dl_add_imx_epdc(&epdc_data);
+		else
+			imx6sl_add_imx_spdc(&spdc_data);
+	}
 	imx6q_add_dvfs_core(&mx6sl_evk_dvfscore_data);
 
 	imx6q_init_audio();
+
+	/* uart2 for bluetooth */
+#ifdef SXSDMAN_BLUETOOTH_ENABLE
+	if (uart4_enabled)
+		uart4_init();
+#else
+	if (uart2_enabled)
+		uart2_init();
+#endif
+
+	mxc_register_device(&mxc_bt_rfkill, &mxc_bt_rfkill_data);
 
 	imx6q_add_viim();
 	imx6q_add_imx2_wdt(0, NULL);
@@ -1299,12 +1633,19 @@ static void __init mx6_evk_init(void)
 	imx6sl_add_rngb();
 	imx6sl_add_imx_pxp_v4l2();
 
+	mxc_spdif_data.spdif_core_clk = clk_get_sys("mxc_spdif.0", NULL);
+	clk_put(mxc_spdif_data.spdif_core_clk);
+	imx6q_add_spdif(&mxc_spdif_data);
+	imx6q_add_spdif_dai();
+	imx6q_add_spdif_audio_device();
+
 	imx6q_add_perfmon(0);
 	imx6q_add_perfmon(1);
 	imx6q_add_perfmon(2);
 	/* Register charger chips */
 	platform_device_register(&evk_max8903_charger_1);
 	pm_power_off = mx6_snvs_poweroff;
+	imx6q_add_pm_imx(0, &mx6sl_evk_pm_data);
 }
 
 extern void __iomem *twd_base;

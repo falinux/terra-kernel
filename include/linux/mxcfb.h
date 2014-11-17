@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2004-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -92,6 +92,8 @@ struct mxcfb_rect {
 #define EPDC_FLAG_USE_ALT_BUFFER		0x100
 #define EPDC_FLAG_TEST_COLLISION		0x200
 #define EPDC_FLAG_GROUP_UPDATE			0x400
+#define EPDC_FLAG_USE_DITHERING_Y1		0x2000
+#define EPDC_FLAG_USE_DITHERING_Y4		0x4000
 
 #define FB_POWERDOWN_DISABLE			-1
 
@@ -108,7 +110,7 @@ struct mxcfb_update_data {
 	__u32 update_mode;
 	__u32 update_marker;
 	int temp;
-	uint flags;
+	unsigned int flags;
 	struct mxcfb_alt_buffer_data alt_buffer_data;
 };
 
@@ -130,6 +132,14 @@ struct mxcfb_waveform_modes {
 	int mode_gc32;
 };
 
+/*
+ * Structure used to define a 5*3 matrix of parameters for
+ * setting IPU DP CSC module related to this framebuffer.
+ */
+struct mxcfb_csc_matrix {
+	int param[5][3];
+};
+
 #define MXCFB_WAIT_FOR_VSYNC	_IOW('F', 0x20, u_int32_t)
 #define MXCFB_SET_GBL_ALPHA     _IOW('F', 0x21, struct mxcfb_gbl_alpha)
 #define MXCFB_SET_CLR_KEY       _IOW('F', 0x22, struct mxcfb_color_key)
@@ -142,6 +152,7 @@ struct mxcfb_waveform_modes {
 #define MXCFB_GET_DIFMT	       _IOR('F', 0x2A, u_int32_t)
 #define MXCFB_GET_FB_BLANK     _IOR('F', 0x2B, u_int32_t)
 #define MXCFB_SET_DIFMT		_IOW('F', 0x2C, u_int32_t)
+#define MXCFB_CSC_UPDATE	_IOW('F', 0x2D, struct mxcfb_csc_matrix)
 
 /* IOCTLs for E-ink panel updates */
 #define MXCFB_SET_WAVEFORM_MODES	_IOW('F', 0x2B, struct mxcfb_waveform_modes)
@@ -152,11 +163,17 @@ struct mxcfb_waveform_modes {
 #define MXCFB_SET_PWRDOWN_DELAY		_IOW('F', 0x30, int32_t)
 #define MXCFB_GET_PWRDOWN_DELAY		_IOR('F', 0x31, int32_t)
 #define MXCFB_SET_UPDATE_SCHEME		_IOW('F', 0x32, __u32)
+#define MXCFB_GET_WORK_BUFFER		_IOWR('F', 0x34, unsigned long)
 
 #ifdef __KERNEL__
 
 extern struct fb_videomode mxcfb_modedb[];
 extern int mxcfb_modedb_sz;
+
+enum {
+	MXC_DISP_SPEC_DEV = 0,
+	MXC_DISP_DDC_DEV = 1,
+};
 
 enum {
 	MXCFB_REFRESH_OFF,
@@ -167,5 +184,8 @@ enum {
 int mxcfb_set_refresh_mode(struct fb_info *fbi, int mode,
 			   struct mxcfb_rect *update_region);
 int mxc_elcdif_frame_addr_setup(dma_addr_t phys);
+void mxcfb_elcdif_register_mode(const struct fb_videomode *modedb,
+		int num_modes, int dev_mode);
+
 #endif				/* __KERNEL__ */
 #endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -30,11 +30,8 @@
 #include <linux/fsl_devices.h>
 #include <linux/smsc911x.h>
 #include <linux/spi/spi.h>
-#if defined(CONFIG_MTD_M25P80) || defined(CONFIG_MTD_M25P80_MODULE)
 #include <linux/spi/flash.h>
-#else
 #include <linux/mtd/physmap.h>
-#endif
 #include <linux/i2c.h>
 #include <linux/i2c/pca953x.h>
 #include <linux/ata.h>
@@ -98,11 +95,11 @@
 #define SABREAUTO_ANDROID_MENU		IMX_GPIO_NR(2, 12)
 #define SABREAUTO_ANDROID_VOLUP		IMX_GPIO_NR(2, 15)
 #define SABREAUTO_CAP_TCH_INT		IMX_GPIO_NR(2, 28)
+#define SABREAUTO_eCOMPASS_INT		IMX_GPIO_NR(2, 29)
 #define SABREAUTO_ECSPI1_CS1		IMX_GPIO_NR(3, 19)
 #define SABREAUTO_DISP0_PWR		IMX_GPIO_NR(3, 24)
 #define SABREAUTO_DISP0_I2C_EN		IMX_GPIO_NR(3, 28)
 #define SABREAUTO_DISP0_DET_INT		IMX_GPIO_NR(3, 31)
-#define SABREAUTO_CSI0_RST		IMX_GPIO_NR(4, 5)
 #define SABREAUTO_DISP0_RESET		IMX_GPIO_NR(5, 0)
 #define SABREAUTO_I2C3_STEER		IMX_GPIO_NR(5, 4)
 #define SABREAUTO_WEIM_NOR_WDOG1        IMX_GPIO_NR(4, 29)
@@ -110,13 +107,17 @@
 #define SABREAUTO_PMIC_INT		IMX_GPIO_NR(5, 16)
 #define SABREAUTO_ALS_INT		IMX_GPIO_NR(5, 17)
 #define SABREAUTO_SD1_WP		IMX_GPIO_NR(5, 20)
-#define SABREAUTO_CSI0_PWN		IMX_GPIO_NR(5, 23)
 #define SABREAUTO_USB_HOST1_OC		IMX_GPIO_NR(5, 0)
 #define SABREAUTO_SD3_CD		IMX_GPIO_NR(6, 15)
 
 #define SABREAUTO_MAX7310_1_BASE_ADDR	IMX_GPIO_NR(8, 0)
 #define SABREAUTO_MAX7310_2_BASE_ADDR	IMX_GPIO_NR(8, 8)
 #define SABREAUTO_MAX7310_3_BASE_ADDR	IMX_GPIO_NR(8, 16)
+
+#define MX6_ENET_IRQ		IMX_GPIO_NR(1, 6)
+#define IOMUX_OBSRV_MUX1_OFFSET	0x3c
+#define OBSRV_MUX1_MASK			0x3f
+#define OBSRV_MUX1_ENET_IRQ		0x9
 
 #define SABREAUTO_IO_EXP_GPIO1(x)	(SABREAUTO_MAX7310_1_BASE_ADDR + (x))
 #define SABREAUTO_IO_EXP_GPIO2(x)	(SABREAUTO_MAX7310_2_BASE_ADDR + (x))
@@ -139,8 +140,10 @@
 extern char *gp_reg_id;
 extern char *soc_reg_id;
 extern char *pu_reg_id;
+extern bool enet_to_gpio_6;
 
 static int mma8451_position = 3;
+static int mag3110_position = 2;
 static struct clk *sata_clk;
 static int mipi_sensor;
 static int can0_enable;
@@ -331,10 +334,16 @@ mx6q_sabreauto_anatop_thermal_data __initconst = {
 	.name = "anatop_thermal",
 };
 
+static const struct imxuart_platform_data mx6_bt_uart_data __initconst = {
+	.flags = IMXUART_HAVE_RTSCTS | IMXUART_SDMA,
+	.dma_req_rx = MX6Q_DMA_REQ_UART3_RX,
+	.dma_req_tx = MX6Q_DMA_REQ_UART3_TX,
+};
+
 static inline void mx6q_sabreauto_init_uart(void)
 {
 	imx6q_add_imx_uart(1, NULL);
-	imx6q_add_imx_uart(2, NULL);
+	imx6q_add_imx_uart(2, &mx6_bt_uart_data);
 	imx6q_add_imx_uart(3, NULL);
 }
 
@@ -343,6 +352,17 @@ static int mx6q_sabreauto_fec_phy_init(struct phy_device *phydev)
 	unsigned short val;
 
 	if (!board_is_mx6_reva()) {
+		/* Ar8031 phy SmartEEE feature cause link status generates
+		 * glitch, which cause ethernet link down/up issue, so
+		 * disable SmartEEE
+		 */
+		phy_write(phydev, 0xd, 0x3);
+		phy_write(phydev, 0xe, 0x805d);
+		phy_write(phydev, 0xd, 0x4003);
+		val = phy_read(phydev, 0xe);
+		val &= ~(0x1 << 8);
+		phy_write(phydev, 0xe, val);
+
 		/* To enable AR8031 ouput a 125MHz clk from CLK_25M */
 		phy_write(phydev, 0xd, 0x7);
 		phy_write(phydev, 0xe, 0x8016);
@@ -390,6 +410,7 @@ static struct fec_platform_data fec_data __initdata = {
 	.init			= mx6q_sabreauto_fec_phy_init,
 	.power_hibernate	= mx6q_sabreauto_fec_power_hibernate,
 	.phy			= PHY_INTERFACE_MODE_RGMII,
+	.gpio_irq		= MX6_ENET_IRQ,
 };
 
 static int mx6q_sabreauto_spi_cs[] = {
@@ -401,15 +422,19 @@ static const struct spi_imx_master mx6q_sabreauto_spi_data __initconst = {
 	.num_chipselect = ARRAY_SIZE(mx6q_sabreauto_spi_cs),
 };
 
-#if defined(CONFIG_MTD_M25P80) || defined(CONFIG_MTD_M25P80_MODULE)
 static struct mtd_partition m25p32_partitions[] = {
 	{
 		.name	= "bootloader",
 		.offset	= 0,
-		.size	= 0x00100000,
+		.size	= SZ_256K,
+	}, {
+		.name	= "bootenv",
+		.offset = MTDPART_OFS_APPEND,
+		.size	= SZ_8K,
+		.mask_flags = MTD_WRITEABLE,
 	}, {
 		.name	= "kernel",
-		.offset	= MTDPART_OFS_APPEND,
+		.offset	= MTDPART_OFS_NXTBLK,
 		.size	= MTDPART_SIZ_FULL,
 	},
 };
@@ -422,7 +447,6 @@ static struct flash_platform_data m25p32_spi_flash_data = {
 };
 
 static struct spi_board_info m25p32_spi0_board_info[] __initdata = {
-#if defined(CONFIG_MTD_M25P80)
 	{
 		/* The modalias must be the same as spi device driver name */
 		.modalias	= "m25p80",
@@ -431,25 +455,34 @@ static struct spi_board_info m25p32_spi0_board_info[] __initdata = {
 		.chip_select	= 0,
 		.platform_data	= &m25p32_spi_flash_data,
 	},
-#endif
 };
 static void spi_device_init(void)
 {
 	spi_register_board_info(m25p32_spi0_board_info,
 				ARRAY_SIZE(m25p32_spi0_board_info));
 }
-#else
+
 static struct mtd_partition mxc_nor_partitions[] = {
 	{
-		.name	= "Bootloader",
+		.name	= "bootloader",
 		.offset	= 0,
-		.size	=  0x00080000,
+		.size	= SZ_256K,
 	}, {
-		.name	= "nor.Kernel",
+		.name = "bootenv",
+		.offset = MTDPART_OFS_APPEND,
+		.size = SZ_256K,
+		.mask_flags = MTD_WRITEABLE,
+	}, {
+		.name	= "kernel",
 		.offset	= MTDPART_OFS_APPEND,
+		.size	= SZ_4M,
+	}, {
+		.name	= "rootfs",
+		.offset = MTDPART_OFS_APPEND,
 		.size	= MTDPART_SIZ_FULL,
 	},
 };
+
 static struct resource nor_flash_resource = {
 	.start		= CS0_BASE_ADDR,
 	.end		= CS0_BASE_ADDR  +  0x02000000 - 1,
@@ -473,22 +506,79 @@ static struct platform_device physmap_flash_device = {
 	.num_resources	= 1,
 };
 
+/* These registers settings are just valid for Numonyx M29W256GL7AN6E. */
 static void mx6q_setup_weimcs(void)
 {
-	unsigned int reg;
 	void __iomem *nor_reg = MX6_IO_ADDRESS(WEIM_BASE_ADDR);
 	void __iomem *ccm_reg = MX6_IO_ADDRESS(CCM_BASE_ADDR);
+	unsigned int reg;
+	struct clk *clk;
+	u32 rate;
 
-	/*CCM_BASE_ADDR + CLKCTL_CCGR6*/
+	/* CLKCTL_CCGR6: Set emi_slow_clock to be on in all modes */
 	reg = readl(ccm_reg + 0x80);
 	reg |= 0x00000C00;
 	writel(reg, ccm_reg + 0x80);
 
-	__raw_writel(0x00620081, nor_reg);
-	__raw_writel(0x1C022000, nor_reg + 0x00000008);
-	__raw_writel(0x0804a240, nor_reg + 0x00000010);
+	/* Timing settings below based upon datasheet for M29W256GL7AN6E
+	   These setting assume that the EIM_SLOW_CLOCK is set to 132 MHz */
+	clk = clk_get(NULL, "emi_slow_clk");
+	if (IS_ERR(clk))
+		printk(KERN_ERR "emi_slow_clk not found\n");
+
+	rate = clk_get_rate(clk);
+	if (rate != 132000000)
+		printk(KERN_ERR "Warning: emi_slow_clk not set to 132 MHz!"
+		       " WEIM NOR timing may be incorrect!\n");
+
+	/*
+	 * For EIM General Configuration registers.
+	 *
+	 * CS0GCR1:
+	 *	GBC = 0; CSREC = 6; DSZ = 2; BL = 0;
+	 *	CREP = 1; CSEN = 1;
+	 *
+	 *	EIM Operation Mode: MUM = SRD = SWR = 0.
+	 *		(Async write/Async page read, none multiplexed)
+	 *
+	 * CS0GCR2:
+	 *	ADH = 1
+	 */
+	writel(0x00620081, nor_reg);
+	writel(0x00000001, nor_reg + 0x00000004);
+
+	/*
+	 * For EIM Read Configuration registers.
+	 *
+	 * CS0RCR1:
+	 *	RWSC = 1C;
+	 *	RADVA = 0; RADVN = 2;
+	 *	OEA = 2; OEN = 0;
+	 *	RCSA = 0; RCSN = 0
+	 *
+	 * CS0RCR2:
+	 *	APR = 1 (Async Page Read);
+	 *	PAT = 4 (6 EIM clock sycles)
+	 */
+	writel(0x1C022000, nor_reg + 0x00000008);
+	writel(0x0000C000, nor_reg + 0x0000000C);
+
+	/*
+	 * For EIM Write Configuration registers.
+	 *
+	 * CS0WCR1:
+	 *	WWSC = 20;
+	 *	WADVA = 0; WADVN = 1;
+	 *	WBEA = 1; WBEN = 2;
+	 *	WEA = 1; WEN = 6;
+	 *	WCSA = 1; WCSN = 2;
+	 *
+	 * CS0WCR2:
+	 *	WBCDD = 0
+	 */
+	writel(0x1404a38e, nor_reg + 0x00000010);
+	writel(0x00000000, nor_reg + 0x00000014);
 }
-#endif
 
 static int max7310_1_setup(struct i2c_client *client,
 	unsigned gpio_base, unsigned ngpio,
@@ -547,6 +637,9 @@ static int max7310_u39_setup(struct i2c_client *client,
 
 	int n;
 
+	if (uart3_en)
+		max7310_gpio_value[4] = 1;
+
 	 for (n = 0; n < ARRAY_SIZE(max7310_gpio_value); ++n) {
 		gpio_request(gpio_base + n, "MAX7310 U39 GPIO Expander");
 		if (max7310_gpio_value[n] < 0)
@@ -602,30 +695,20 @@ static struct pca953x_platform_data max7310_u43_platdata = {
 	.setup		= max7310_u43_setup,
 };
 
-static struct fsl_mxc_camera_platform_data camera_data = {
-	.analog_regulator	= "DA9052_LDO7",
-	.core_regulator		= "DA9052_LDO9",
-	.mclk			= 24000000,
-	.csi			= 0,
-};
-
-static struct fsl_mxc_camera_platform_data ov5640_mipi_data = {
-	.mclk	= 24000000,
-	.csi	= 0,
-};
-
 static void adv7180_pwdn(int pwdn)
 {
-	int status = -1;
-
-	status = gpio_request(SABREAUTO_VIDEOIN_PWR, "tvin-pwr");
-
 	if (pwdn)
-		gpio_direction_output(SABREAUTO_VIDEOIN_PWR, 0);
+		gpio_set_value_cansleep(SABREAUTO_VIDEOIN_PWR, 0);
 	else
-		gpio_direction_output(SABREAUTO_VIDEOIN_PWR, 1);
+		gpio_set_value_cansleep(SABREAUTO_VIDEOIN_PWR, 1);
+}
 
-	gpio_free(SABREAUTO_VIDEOIN_PWR);
+static void mx6q_csi0_io_init(void)
+{
+	if (cpu_is_mx6q())
+		mxc_iomux_set_gpr_register(1, 19, 1, 1);
+	else if (cpu_is_mx6dl())
+		mxc_iomux_set_gpr_register(13, 0, 3, 4);
 }
 
 static struct fsl_mxc_tvin_platform_data adv7180_data = {
@@ -636,13 +719,32 @@ static struct fsl_mxc_tvin_platform_data adv7180_data = {
 	.pwdn		= adv7180_pwdn,
 	.reset		= NULL,
 	.cvbs		= true,
+	.io_init	= mx6q_csi0_io_init,
+};
+
+static void mx6q_mipi_csi1_io_init(void)
+{
+	if (cpu_is_mx6dl())
+		mxc_iomux_set_gpr_register(13, 3, 3, 1);
+}
+
+static struct fsl_mxc_tvin_platform_data adv7280_data = {
+	.dvddio_reg	= NULL,
+	.dvdd_reg	= NULL,
+	.avdd_reg	= NULL,
+	.pvdd_reg	= NULL,
+	.pwdn		= NULL,
+	.cvbs		= true,
+	.io_init    = mx6q_mipi_csi1_io_init,
+	/* csi slave reg address */
+	.csi_tx_addr = 0x52,
 };
 
 static struct imxi2c_platform_data mx6q_sabreauto_i2c2_data = {
 	.bitrate	= 400000,
 };
 
-static struct imxi2c_platform_data mx6q_sabreauto_i2c1_data = {
+static struct imxi2c_platform_data mx6q_sabreauto_i2c_data = {
 	.bitrate	= 100000,
 };
 
@@ -671,13 +773,14 @@ static struct i2c_board_info mxc_i2c2_board_info[] __initdata = {
 		I2C_BOARD_INFO("adv7180", 0x21),
 		.platform_data = (void *)&adv7180_data,
 	}, {
-		I2C_BOARD_INFO("ov3640", 0x3c),
-		.platform_data = (void *)&camera_data,
-	},
-	{
 		I2C_BOARD_INFO("isl29023", 0x44),
 		.irq  = gpio_to_irq(SABREAUTO_ALS_INT),
 		.platform_data = &ls_data,
+	},
+	{
+		I2C_BOARD_INFO("mag3110", 0x0e),
+		.irq = gpio_to_irq(SABREAUTO_eCOMPASS_INT),
+		.platform_data = (void *)&mag3110_position,
 	},
 	{
 		I2C_BOARD_INFO("mma8451", 0x1c),
@@ -692,17 +795,16 @@ static struct i2c_board_info mxc_i2c1_board_info[] __initdata = {
 	}, {
 		I2C_BOARD_INFO("mxc_hdmi_i2c", 0x50),
 	}, {
-		I2C_BOARD_INFO("ov5640_mipi", 0x3c),
-		.platform_data = (void *)&ov5640_mipi_data,
-	}, {
 		I2C_BOARD_INFO("cs42888", 0x48),
 		.platform_data = (void *)&cs42888_data,
-	},
-	{
+	}, {
 		I2C_BOARD_INFO("si4763_i2c", 0x63),
+	}, {
+		I2C_BOARD_INFO("adv7280", 0x21),
+		.platform_data = (void *)&adv7280_data,
 	},
-
 };
+
 struct platform_device mxc_si4763_audio_device = {
 	.name = "imx-tuner-si4763",
 	.id = 0,
@@ -760,7 +862,6 @@ static void __init imx6q_sabreauto_init_usb(void)
 
 	mxc_iomux_set_gpr_register(1, 13, 1, 0);
 	mx6_set_otghost_vbus_func(imx6q_sabreauto_usbotg_vbus);
-	mx6_usb_dr_init();
 	mx6_set_host1_vbus_func(imx6q_sabreauto_usbhost1_vbus);
 #ifdef CONFIG_USB_EHCI_ARC_HSIC
 	mx6_usb_h2_init();
@@ -821,11 +922,22 @@ static int mx6q_sabreauto_sata_init(struct device *dev, void __iomem *addr)
 	tmpdata = clk_get_rate(clk) / 1000;
 	clk_put(clk);
 
+#ifdef CONFIG_SATA_AHCI_PLATFORM
 	ret = sata_init(addr, tmpdata);
 	if (ret == 0)
 		return ret;
+#else
+	usleep_range(1000, 2000);
+	/* AHCI PHY enter into PDDQ mode if the AHCI module is not enabled */
+	tmpdata = readl(addr + PORT_PHY_CTL);
+	writel(tmpdata | PORT_PHY_CTL_PDDQ_LOC, addr + PORT_PHY_CTL);
+	pr_info("No AHCI save PWR: PDDQ %s\n", ((readl(addr + PORT_PHY_CTL)
+					>> 20) & 1) ? "enabled" : "disabled");
+#endif
 
 release_sata_clk:
+	/* disable SATA_PHY PLL */
+	writel((readl(IOMUXC_GPR13) & ~0x2), IOMUXC_GPR13);
 	clk_disable(sata_clk);
 put_sata_clk:
 	clk_put(sata_clk);
@@ -833,6 +945,7 @@ put_sata_clk:
 	return ret;
 }
 
+#ifdef CONFIG_SATA_AHCI_PLATFORM
 static void mx6q_sabreauto_sata_exit(struct device *dev)
 {
 	clk_disable(sata_clk);
@@ -844,6 +957,7 @@ static struct ahci_platform_data mx6q_sabreauto_sata_data = {
 	.init = mx6q_sabreauto_sata_init,
 	.exit = mx6q_sabreauto_sata_exit,
 };
+#endif
 
 static struct imx_asrc_platform_data imx_asrc_data = {
 	.channel_bits	= 4,
@@ -974,10 +1088,10 @@ static struct fsl_mxc_ldb_platform_data ldb_data = {
 static struct imx_ipuv3_platform_data ipu_data[] = {
 	{
 		.rev		= 4,
-		.csi_clk[0]	= "ccm_clk0",
+		.csi_clk[0]	= "clko_clk",
 	}, {
 		.rev		= 4,
-		.csi_clk[0]	= "ccm_clk0",
+		.csi_clk[0]	= "clko_clk",
 	},
 };
 
@@ -1002,6 +1116,15 @@ static int flexcan1_en;
 static void mx6q_flexcan_switch(void)
 {
   if (flexcan0_en || flexcan1_en) {
+	/*
+	 * The transceiver TJA1041A on sabreauto RevE baseboard will
+	 * fail to transit to Normal state if EN/STBY is high by default
+	 * after board power up. So we set the EN/STBY initial state to low
+	 * first then to high to guarantee the state transition successfully.
+	 */
+	gpio_set_value_cansleep(SABREAUTO_CAN_EN, 0);
+	gpio_set_value_cansleep(SABREAUTO_CAN_STBY, 0);
+
 	gpio_set_value_cansleep(SABREAUTO_CAN_EN, 1);
 	gpio_set_value_cansleep(SABREAUTO_CAN_STBY, 1);
 	/* Enable STEER pin if CAN1 interface is required.
@@ -1050,9 +1173,9 @@ static const struct flexcan_platform_data
 
 static struct mipi_csi2_platform_data mipi_csi2_pdata = {
 	.ipu_id		= 0,
-	.csi_id		= 0,
-	.v_channel	= 0,
-	.lanes		= 2,
+	.csi_id		= 1,
+	.v_channel	= 1,
+	.lanes		= 1,
 	.dphy_clk	= "mipi_pllref_clk",
 	.pixel_clk	= "emi_clk",
 };
@@ -1259,9 +1382,8 @@ static struct mxc_mlb_platform_data mx6_sabreauto_mlb150_data = {
 };
 
 static struct mxc_dvfs_platform_data sabreauto_dvfscore_data = {
-	.reg_id			= "cpu_vddgp",
-	.soc_id			= "cpu_vddsoc",
-	.pu_id			= "cpu_vddvpu",
+	.reg_id			= "VDDCORE",
+	.soc_id			= "VDDSOC",
 	.clk1_id		= "cpu_clk",
 	.clk2_id 		= "gpc_dvfs_clk",
 	.gpc_cntr_offset 	= MXC_GPC_CNTR_OFFSET,
@@ -1301,24 +1423,6 @@ static int __init early_enable_can0(char *p)
 	return 0;
 }
 early_param("can0", early_enable_can0);
-
-static inline void __init mx6q_csi0_io_init(void)
-{
-	/* Camera reset */
-	gpio_request(SABREAUTO_CSI0_RST, "cam-reset");
-	gpio_direction_output(SABREAUTO_CSI0_RST, 1);
-
-	/* Camera power down */
-	gpio_request(SABREAUTO_CSI0_PWN, "cam-pwdn");
-	gpio_direction_output(SABREAUTO_CSI0_PWN, 1);
-	msleep(1);
-	gpio_set_value(SABREAUTO_CSI0_PWN, 0);
-
-	if (cpu_is_mx6q())
-		mxc_iomux_set_gpr_register(1, 19, 1, 1);
-	else if (cpu_is_mx6dl())
-		mxc_iomux_set_gpr_register(13, 0, 3, 4);
-}
 
 static struct mxc_spdif_platform_data mxc_spdif_data = {
 	.spdif_tx	= 0,	/* disable tx */
@@ -1363,6 +1467,7 @@ static void __init mx6_board_init(void)
 	iomux_v3_cfg_t *tuner_pads = NULL;
 	iomux_v3_cfg_t *spinor_pads = NULL;
 	iomux_v3_cfg_t *weimnor_pads = NULL;
+	iomux_v3_cfg_t *bluetooth_pads = NULL;
 	iomux_v3_cfg_t *extra_pads = NULL;
 
 	int common_pads_cnt;
@@ -1373,6 +1478,7 @@ static void __init mx6_board_init(void)
 	int tuner_pads_cnt;
 	int spinor_pads_cnt;
 	int weimnor_pads_cnt;
+	int bluetooth_pads_cnt;
 	int extra_pads_cnt;
 
 	if (cpu_is_mx6q()) {
@@ -1383,6 +1489,7 @@ static void __init mx6_board_init(void)
 		tuner_pads = mx6q_tuner_pads;
 		spinor_pads = mx6q_spinor_pads;
 		weimnor_pads = mx6q_weimnor_pads;
+		bluetooth_pads = mx6q_bluetooth_pads;
 
 		common_pads_cnt = ARRAY_SIZE(mx6q_sabreauto_pads);
 		can0_pads_cnt = ARRAY_SIZE(mx6q_sabreauto_can0_pads);
@@ -1391,6 +1498,7 @@ static void __init mx6_board_init(void)
 		tuner_pads_cnt = ARRAY_SIZE(mx6q_tuner_pads);
 		spinor_pads_cnt = ARRAY_SIZE(mx6q_spinor_pads);
 		weimnor_pads_cnt = ARRAY_SIZE(mx6q_weimnor_pads);
+		bluetooth_pads_cnt = ARRAY_SIZE(mx6q_bluetooth_pads);
 		if (board_is_mx6_reva()) {
 			i2c3_pads = mx6q_i2c3_pads_rev_a;
 			i2c3_pads_cnt = ARRAY_SIZE(mx6q_i2c3_pads_rev_a);
@@ -1404,6 +1512,18 @@ static void __init mx6_board_init(void)
 			mxc_iomux_v3_setup_multiple_pads(extra_pads,
 					extra_pads_cnt);
 		}
+		if (enet_to_gpio_6) {
+			iomux_v3_cfg_t enet_gpio_pad =
+				MX6Q_PAD_GPIO_6__ENET_IRQ_TO_GPIO_6;
+			mxc_iomux_v3_setup_pad(enet_gpio_pad);
+		} else {
+			iomux_v3_cfg_t mlb_pads[] = {
+				MX6Q_PAD_ENET_TXD1__MLB_MLBCLK,
+				MX6Q_PAD_GPIO_6__MLB_MLBSIG,
+				MX6Q_PAD_GPIO_2__MLB_MLBDAT};
+			mxc_iomux_v3_setup_multiple_pads(mlb_pads,
+				ARRAY_SIZE(mlb_pads));
+		}
 	} else if (cpu_is_mx6dl()) {
 		common_pads = mx6dl_sabreauto_pads;
 		can0_pads = mx6dl_sabreauto_can0_pads;
@@ -1412,6 +1532,7 @@ static void __init mx6_board_init(void)
 		tuner_pads = mx6dl_tuner_pads;
 		spinor_pads = mx6dl_spinor_pads;
 		weimnor_pads = mx6dl_weimnor_pads;
+		bluetooth_pads = mx6dl_bluetooth_pads;
 
 		common_pads_cnt = ARRAY_SIZE(mx6dl_sabreauto_pads);
 		can0_pads_cnt = ARRAY_SIZE(mx6dl_sabreauto_can0_pads);
@@ -1420,6 +1541,7 @@ static void __init mx6_board_init(void)
 		tuner_pads_cnt = ARRAY_SIZE(mx6dl_tuner_pads);
 		spinor_pads_cnt = ARRAY_SIZE(mx6dl_spinor_pads);
 		weimnor_pads_cnt = ARRAY_SIZE(mx6dl_weimnor_pads);
+		bluetooth_pads_cnt = ARRAY_SIZE(mx6dl_bluetooth_pads);
 
 		if (board_is_mx6_reva()) {
 			i2c3_pads = mx6dl_i2c3_pads_rev_a;
@@ -1433,6 +1555,18 @@ static void __init mx6_board_init(void)
 			extra_pads_cnt = ARRAY_SIZE(mx6dl_extra_pads_rev_b);
 			mxc_iomux_v3_setup_multiple_pads(extra_pads,
 					extra_pads_cnt);
+		}
+		if (enet_to_gpio_6) {
+			iomux_v3_cfg_t enet_gpio_pad =
+				MX6DL_PAD_GPIO_6__ENET_IRQ_TO_GPIO_6;
+			mxc_iomux_v3_setup_pad(enet_gpio_pad);
+		} else {
+			iomux_v3_cfg_t mlb_pads[] = {
+				MX6DL_PAD_ENET_TXD1__MLB_MLBCLK,
+				MX6DL_PAD_GPIO_6__MLB_MLBSIG,
+				MX6DL_PAD_GPIO_2__MLB_MLBDAT};
+			mxc_iomux_v3_setup_multiple_pads(mlb_pads,
+				ARRAY_SIZE(mlb_pads));
 		}
 	}
 
@@ -1453,6 +1587,11 @@ static void __init mx6_board_init(void)
 			BUG_ON(!i2c3_pads);
 			mxc_iomux_v3_setup_multiple_pads(i2c3_pads,
 					i2c3_pads_cnt);
+		}
+		if (uart3_en) {
+			BUG_ON(!bluetooth_pads);
+			mxc_iomux_v3_setup_multiple_pads(bluetooth_pads,
+					bluetooth_pads_cnt);
 		}
 	}
 
@@ -1506,7 +1645,6 @@ static void __init mx6_board_init(void)
 
 	gp_reg_id = sabreauto_dvfscore_data.reg_id;
 	soc_reg_id = sabreauto_dvfscore_data.soc_id;
-	pu_reg_id = sabreauto_dvfscore_data.pu_id;
 	mx6q_sabreauto_init_uart();
 	imx6q_add_mipi_csi2(&mipi_csi2_pdata);
 	if (cpu_is_mx6dl()) {
@@ -1542,12 +1680,15 @@ static void __init mx6_board_init(void)
 
 	imx6q_add_imx_caam();
 
-	imx6q_add_imx_i2c(1, &mx6q_sabreauto_i2c1_data);
+	imx6q_add_imx_i2c(1, &mx6q_sabreauto_i2c_data);
 	i2c_register_board_info(1, mxc_i2c1_board_info,
 			ARRAY_SIZE(mxc_i2c1_board_info));
 	imx6q_add_imx_i2c(2, &mx6q_sabreauto_i2c2_data);
 	i2c_register_board_info(2, mxc_i2c2_board_info,
 			ARRAY_SIZE(mxc_i2c2_board_info));
+	if (cpu_is_mx6dl())
+		imx6q_add_imx_i2c(3, &mx6q_sabreauto_i2c_data);
+
 
 	ret = gpio_request(SABREAUTO_PMIC_INT, "pFUZE-int");
 	if (ret) {
@@ -1559,19 +1700,27 @@ static void __init mx6_board_init(void)
 	}
 	/* SPI */
 	imx6q_add_ecspi(0, &mx6q_sabreauto_spi_data);
-#if defined(CONFIG_MTD_M25P80) || defined(CONFIG_MTD_M25P80_MODULE)
-		spi_device_init();
-#else
-		mx6q_setup_weimcs();
-		platform_device_register(&physmap_flash_device);
-#endif
+		if (spinor_en)
+			spi_device_init();
+		else if (weimnor_en) {
+			mx6q_setup_weimcs();
+			platform_device_register(&physmap_flash_device);
+		}
 	imx6q_add_mxc_hdmi(&hdmi_data);
 
 	imx6q_add_anatop_thermal_imx(1, &mx6q_sabreauto_anatop_thermal_data);
 
-	if (!can0_enable)
+	if (!can0_enable) {
+		if (enet_to_gpio_6)
+			/* Make sure the IOMUX_OBSRV_MUX1 is set to ENET_IRQ. */
+			mxc_iomux_set_specialbits_register(
+				IOMUX_OBSRV_MUX1_OFFSET,
+				OBSRV_MUX1_ENET_IRQ,
+				OBSRV_MUX1_MASK);
+		else
+			fec_data.gpio_irq = -1;
 		imx6_init_fec(fec_data);
-
+	}
 	imx6q_add_pm_imx(0, &mx6q_sabreauto_pm_data);
 
 	imx6q_add_sdhci_usdhc_imx(2, &mx6q_sabreauto_sd3_data);
@@ -1579,18 +1728,20 @@ static void __init mx6_board_init(void)
 
 	imx_add_viv_gpu(&imx6_gpu_data, &imx6q_gpu_pdata);
 	imx6q_sabreauto_init_usb();
-	if (cpu_is_mx6q())
+	if (cpu_is_mx6q()) {
+#ifdef CONFIG_SATA_AHCI_PLATFORM
 		imx6q_add_ahci(0, &mx6q_sabreauto_sata_data);
+#else
+		mx6q_sabreauto_sata_init(NULL,
+			(void __iomem *)ioremap(MX6Q_SATA_BASE_ADDR, SZ_4K));
+#endif
+	}
 	imx6q_add_vpu();
 	imx6q_init_audio();
 	platform_device_register(&sabreauto_vmmc_reg_devices);
-	mx6_cpu_regulator_init();
 	imx_asrc_data.asrc_core_clk = clk_get(NULL, "asrc_clk");
 	imx_asrc_data.asrc_audio_clk = clk_get(NULL, "asrc_serial_clk");
 	imx6q_add_asrc(&imx_asrc_data);
-
-	if (!mipi_sensor)
-		mx6q_csi0_io_init();
 
 	/* DISP0 Detect */
 	gpio_request(SABREAUTO_DISP0_DET_INT, "disp0-detect");
@@ -1615,7 +1766,7 @@ static void __init mx6_board_init(void)
 	imx6q_add_viim();
 	imx6q_add_imx2_wdt(0, NULL);
 	imx6q_add_dma();
-	if (!uart3_en)
+	if (!uart3_en && !weimnor_en)
 		imx6q_add_gpmi(&mx6q_gpmi_nand_platform_data);
 
 	imx6q_add_dvfs_core(&sabreauto_dvfscore_data);

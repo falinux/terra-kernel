@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2004-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -16,7 +16,7 @@
  */
 
 /*!
- * @file arch-mxc/mxc_vpu.h
+ * @file plat-mxc/include/mach/mxc_vpu.h
  *
  * @brief VPU system initialization and file operation definition
  *
@@ -58,6 +58,7 @@ struct vpu_mem_desc {
 #define VPU_IOC_QUERY_BITWORK_MEM  _IO(VPU_IOC_MAGIC, 13)
 #define VPU_IOC_SET_BITWORK_MEM    _IO(VPU_IOC_MAGIC, 14)
 #define VPU_IOC_PHYMEM_CHECK	_IO(VPU_IOC_MAGIC, 15)
+#define VPU_IOC_LOCK_DEV	_IO(VPU_IOC_MAGIC, 16)
 
 #define BIT_CODE_RUN			0x000
 #define BIT_CODE_DOWN			0x004
@@ -67,6 +68,7 @@ struct vpu_mem_desc {
 #define BIT_INT_REASON			0x174
 
 #define MJPEG_PIC_STATUS_REG		0x3004
+#define MBC_SET_SUBBLK_EN		0x4A0
 
 #define BIT_WORK_CTRL_BUF_BASE		0x100
 #define BIT_WORK_CTRL_BUF_REG(i)	(BIT_WORK_CTRL_BUF_BASE + i * 4)
@@ -77,7 +79,11 @@ struct vpu_mem_desc {
 #define BIT_FRAME_MEM_CTRL		BIT_WORK_CTRL_BUF_REG(4)
 #define BIT_BIT_STREAM_PARAM		BIT_WORK_CTRL_BUF_REG(5)
 
+#ifndef CONFIG_ARCH_MX6
 #define BIT_RESET_CTRL			0x11C
+#else
+#define BIT_RESET_CTRL			0x128
+#endif
 
 /* i could be 0, 1, 2, 3 */
 #define	BIT_RD_PTR_BASE			0x120

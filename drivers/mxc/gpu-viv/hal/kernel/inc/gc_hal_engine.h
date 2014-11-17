@@ -1,6 +1,6 @@
 /****************************************************************************
 *
-*    Copyright (C) 2005 - 2012 by Vivante Corp.
+*    Copyright (C) 2005 - 2013 by Vivante Corp.
 *
 *    This program is free software; you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
@@ -17,8 +17,6 @@
 *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 *
 *****************************************************************************/
-
-
 
 
 #ifndef __gc_hal_engine_h_
@@ -325,50 +323,6 @@ gcoSURF_Resolve(
     IN gcoSURF DestSurface
     );
 
-/* Export the render target. */
-gceSTATUS
-gcoSURF_ExportRenderTarget(
-    IN gcoSURF SrcSurface
-);
-
-/* Import the render target. */
-gceSTATUS
-gcoSURF_ImportRenderTarget(
-    IN gctUINT32 Pid,
-    IN gcoSURF SrcSurface
-);
-
-/* Save the Resolve info to kernel. */
-gceSTATUS
-gcoSURF_PrepareRemoteResolveRect(
-    IN gcoSURF SrcSurface,
-    IN gcsPOINT_PTR SrcOrigin,
-    IN gcsPOINT_PTR DestOrigin,
-    IN gcsPOINT_PTR RectSize
-    );
-
-/* Resolve using the rectangle info previously saved in the vid mem node. */
-gceSTATUS
-gcoSURF_ResolveFromStoredRect(
-    IN gcoSURF SrcSurface,
-    IN gcoSURF DestSurface
-    );
-
-/* Using the info that Process Pid saved to do resolve. */
-gceSTATUS
-gcoSURF_RemoteResolveRect(
-    IN gcoSURF SrcSurface,
-    IN gcoSURF DestSurface,
-    IN gctBOOL *resolveDiscarded
-    );
-
-/* Return the "resolve submitted indicator" signal. */
-gceSTATUS
-gcoSURF_GetRTSignal(
-    IN gcoSURF RTSurface,
-    OUT gctSIGNAL * resolveSubmittedSignal
-    );
-
 /* Resolve rectangular area of a surface. */
 gceSTATUS
 gcoSURF_ResolveRect(
@@ -390,6 +344,37 @@ gceSTATUS
 gcoSURF_IsRenderable(
     IN gcoSURF Surface
     );
+
+#if gcdSYNC
+gceSTATUS
+gcoSURF_GetFence(
+    IN gcoSURF Surface
+    );
+gceSTATUS
+gcoSURF_WaitFence(
+    IN gcoSURF Surface
+    );
+
+gceSTATUS
+gcoSTREAM_GetFence(
+    IN gcoSTREAM stream
+    );
+
+gceSTATUS
+gcoSTREAM_WaitFence(
+    IN gcoSTREAM stream
+    );
+
+gceSTATUS
+gcoINDEX_GetFence(
+    IN gcoINDEX index
+    );
+
+gceSTATUS
+gcoINDEX_WaitFence(
+    IN gcoINDEX index
+    );
+#endif
 
 /******************************************************************************\
 ******************************** gcoINDEX Object *******************************
@@ -467,6 +452,22 @@ gcoINDEX_UploadOffset(
     IN gctUINT32 Offset,
     IN gctCONST_POINTER Buffer,
     IN gctSIZE_T Bytes
+    );
+
+/*Merge index2 to index1 from 0, index2 must subset of inex1*/
+gceSTATUS
+gcoINDEX_Merge(
+    IN gcoINDEX Index1,
+    IN gcoINDEX Index2
+    );
+
+/*check if index buffer is enough for this draw*/
+gctBOOL
+gcoINDEX_CheckRange(
+    IN gcoINDEX Index,
+    IN gceINDEX_TYPE Type,
+    IN gctINT Count,
+    IN gctUINT32  Indices
     );
 
 /* Query the index capabilities. */
@@ -1210,6 +1211,12 @@ gco3D_SetWClipEnable(
     );
 
 gceSTATUS
+gco3D_GetWClipEnable(
+    IN gco3D Engine,
+    OUT gctBOOL * Enable
+    );
+
+gceSTATUS
 gco3D_SetWPlaneLimitF(
 	IN gco3D Engine,
 	IN gctFLOAT Value
@@ -1220,6 +1227,13 @@ gco3D_SetWPlaneLimitX(
 	IN gco3D Engine,
 	IN gctFIXED_POINT Value
     );
+
+
+gceSTATUS
+gco3D_SetWPlaneLimit(
+        IN gco3D Engine,
+        IN gctFLOAT Value
+        );
 
 /*----------------------------------------------------------------------------*/
 /*-------------------------- gco3D Fragment Processor ------------------------*/
@@ -1372,6 +1386,16 @@ typedef enum _gceTEXTURE_FACE
 }
 gceTEXTURE_FACE;
 
+#if gcdFORCE_MIPMAP
+typedef enum
+{
+    gcvForceMipDisabled  = 0,
+    gcvForceMipEnable    = 1,
+    gcvForceMipGenerated = 2,
+    gcvForceMipNever     = 3,
+}gceFORCE_MIPMAP;
+#endif
+
 typedef struct _gcsTEXTURE
 {
     /* Addressing modes. */
@@ -1387,7 +1411,11 @@ typedef struct _gcsTEXTURE
     gceTEXTURE_FILTER           magFilter;
     gceTEXTURE_FILTER           mipFilter;
     gctUINT                     anisoFilter;
-
+    gctBOOL                     forceTopLevel;
+    gctBOOL                     autoMipmap;
+#if gcdFORCE_MIPMAP
+    gceFORCE_MIPMAP             forceMipmap;
+#endif
     /* Level of detail. */
     gctFIXED_POINT              lodBias;
     gctFIXED_POINT              lodMin;
@@ -1420,6 +1448,31 @@ gcoTEXTURE_ConstructSized(
 gceSTATUS
 gcoTEXTURE_Destroy(
     IN gcoTEXTURE Texture
+    );
+#if gcdFORCE_MIPMAP
+gceSTATUS
+gcoTEXTURE_DestroyForceMipmap(
+    IN gcoTEXTURE Texture
+    );
+
+gceSTATUS
+gcoTEXTURE_GetMipLevels(
+    IN gcoTEXTURE Texture,
+    OUT gctINT * levels
+    );
+#endif
+/* Replace a mipmap in gcoTEXTURE object. */
+gceSTATUS
+gcoTEXTURE_ReplaceMipMap(
+    IN gcoTEXTURE Texture,
+    IN gctUINT Level,
+    IN gctUINT Width,
+    IN gctUINT Height,
+    IN gctINT imageFormat,
+    IN gceSURF_FORMAT Format,
+    IN gctUINT Depth,
+    IN gctUINT Faces,
+    IN gcePOOL Pool
     );
 
 /* Upload data to an gcoTEXTURE object. */
@@ -1461,6 +1514,29 @@ gcoTEXTURE_UploadCompressed(
     IN gctUINT Slice,
     IN gctCONST_POINTER Memory,
     IN gctSIZE_T Bytes
+    );
+
+/* Upload compressed sub data to an gcoTEXTURE object. */
+gceSTATUS
+gcoTEXTURE_UploadCompressedSub(
+    IN gcoTEXTURE Texture,
+    IN gctUINT MipMap,
+    IN gceTEXTURE_FACE Face,
+    IN gctUINT XOffset,
+    IN gctUINT YOffset,
+    IN gctUINT Width,
+    IN gctUINT Height,
+    IN gctUINT Slice,
+    IN gctCONST_POINTER Memory,
+    IN gctSIZE_T Size
+    );
+
+/* GetImageFormat of texture. */
+gceSTATUS
+gcoTEXTURE_GetImageFormat(
+    IN gcoTEXTURE Texture,
+    IN gctUINT MipMap,
+    OUT gctINT *  ImageFormat
     );
 
 /* Get gcoSURF object for a mipmap level. */
@@ -1510,6 +1586,12 @@ gcoTEXTURE_AddMipMapFromSurface(
     );
 
 gceSTATUS
+gcoTEXTURE_SetMaxLevel(
+    IN gcoTEXTURE Texture,
+    IN gctUINT Levels
+    );
+
+gceSTATUS
 gcoTEXTURE_SetEndianHint(
     IN gcoTEXTURE Texture,
     IN gceENDIAN_HINT EndianHint
@@ -1553,6 +1635,12 @@ gcoTEXTURE_RenderIntoMipMap(
 
 gceSTATUS
 gcoTEXTURE_IsRenderable(
+    IN gcoTEXTURE Texture,
+    IN gctUINT Level
+    );
+
+gceSTATUS
+gcoTEXTURE_IsRenderableEx(
     IN gcoTEXTURE Texture,
     IN gctUINT Level
     );
@@ -1764,6 +1852,10 @@ typedef struct _gcsVERTEXARRAY
 
     /* Vertex shader linkage. */
     gctUINT             linkage;
+
+#if gcdUSE_WCLIP_PATCH
+    gctBOOL             isPosition;
+#endif
 }
 gcsVERTEXARRAY,
 * gcsVERTEXARRAY_PTR;
@@ -1790,7 +1882,13 @@ gcoVERTEXARRAY_Bind(
     IN gcoINDEX IndexObject,
     IN gctPOINTER IndexMemory,
     IN OUT gcePRIMITIVE * PrimitiveType,
+#if gcdUSE_WCLIP_PATCH
+    IN OUT gctUINT * PrimitiveCount,
+    IN OUT gctFLOAT * wLimitRms,
+    IN OUT gctBOOL * wLimitDirty
+#else
     IN OUT gctUINT * PrimitiveCount
+#endif
     );
 
 gctUINT
@@ -1892,21 +1990,15 @@ gceSTATUS
 gcoHAL_GetSharedInfo(
     IN gctUINT32 Pid,
     IN gctUINT32 DataId,
-    OUT gctUINT8_PTR Data,
     IN gctSIZE_T Bytes,
-    IN gcuVIDMEM_NODE_PTR Node,
-    OUT gctUINT8_PTR NodeData,
-    IN gceVIDMEM_NODE_SHARED_INFO_TYPE SharedInfoType
+    OUT gctPOINTER Data
     );
 
 gceSTATUS
 gcoHAL_SetSharedInfo(
     IN gctUINT32 DataId,
-    IN gctUINT8_PTR Data,
-    IN gctSIZE_T Bytes,
-    IN gcuVIDMEM_NODE_PTR Node,
-    IN gctUINT8_PTR NodeData,
-    IN gceVIDMEM_NODE_SHARED_INFO_TYPE SharedInfoType
+    IN gctPOINTER Data,
+    IN gctSIZE_T Bytes
     );
 
 #ifdef __cplusplus

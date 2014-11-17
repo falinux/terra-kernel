@@ -25,10 +25,10 @@ static inline struct platform_device *imx_add_platform_device(
 			name, id, res, num_resources, data, size_data, 0);
 }
 
-struct imx_dma_data {
+struct imx_dma_res_data {
 	resource_size_t iobase;
 };
-struct platform_device *__init imx_add_dma(const struct imx_dma_data *data);
+struct platform_device *__init imx_add_dma(const struct imx_dma_res_data *data);
 
 #include <linux/fec.h>
 struct imx_fec_data {
@@ -112,9 +112,11 @@ struct imx_caam_jr_data {
 };
 
 struct imx_caam_data {
-	resource_size_t iobase_caam;
-	resource_size_t irq_sec_vio;
-	resource_size_t irq_snvs;
+	resource_size_t iobase_caam;	/* entirety of CAAM register map */
+	resource_size_t iobase_caam_sm;	/* base of secure memory */
+	resource_size_t iobase_snvs;	/* base of SNVS */
+	resource_size_t irq_sec_vio;	/* SNVS security violation */
+	resource_size_t irq_snvs;	/* SNVS consolidated (incl. RTC) */
 	struct imx_caam_jr_data jr[4];	/* offset+IRQ for each possible ring */
 };
 
@@ -689,4 +691,25 @@ struct platform_device *__init imx_add_pcie(
 		const struct imx_pcie_data *data,
 		const struct imx_pcie_platform_data *pdata);
 
+// [FALINUX]  arch/arm/plat-mxc/devices/platform-sja1000.c
+#include <linux/can/platform/sja1000.h>
+struct imx_sja1000_data {
+	int id;
+	resource_size_t iobase;
+	resource_size_t iosize;
+	resource_size_t irq;
+};
+
+struct platform_device *__init imx_add_sja1000(
+		const struct imx_sja1000_data *data,
+		const struct sja1000_platform_data *pdata);
+
 void __init imx_add_imx_armpmu(void);
+
+struct imx_fsl_csi_data {
+    resource_size_t iobase;
+    resource_size_t iosize;
+    resource_size_t irq;
+};
+struct platform_device *__init imx_add_fsl_csi(
+		const struct imx_fsl_csi_data *data);

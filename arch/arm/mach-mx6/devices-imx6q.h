@@ -23,6 +23,10 @@ extern const struct imx_imx_uart_1irq_data imx6q_imx_uart_data[] __initconst;
 #define imx6q_add_imx_uart(id, pdata)	\
 	imx_add_imx_uart_1irq(&imx6q_imx_uart_data[id], pdata)
 
+extern const struct imx_imx_uart_1irq_data imx6sl_imx_uart_data[] __initconst;
+#define imx6sl_add_imx_uart(id, pdata)	\
+	imx_add_imx_uart_1irq(&imx6sl_imx_uart_data[id], pdata)
+
 extern const struct imx_snvs_rtc_data imx6q_imx_snvs_rtc_data __initconst;
 #define imx6q_add_imx_snvs_rtc()	\
 	imx_add_snvs_rtc(&imx6q_imx_snvs_rtc_data)
@@ -36,8 +40,8 @@ imx6q_anatop_thermal_imx_data __initconst;
 #define imx6q_add_anatop_thermal_imx(id, pdata)	\
 	imx_add_anatop_thermal_imx(&imx6q_anatop_thermal_imx_data, pdata)
 
-extern const struct imx_dma_data imx6q_dma_data __initconst;
-#define imx6q_add_dma()	imx_add_dma(&imx6q_dma_data);
+extern const struct imx_dma_res_data imx6q_dma_res_data __initconst;
+#define imx6q_add_dma()	imx_add_dma(&imx6q_dma_res_data);
 
 #define imx6q_add_gpmi(platform_data)	imx_add_gpmi(platform_data);
 
@@ -219,6 +223,10 @@ extern const struct imx_pxp_data imx6dl_pxp_data __initconst;
 #define imx6sl_add_imx_pxp_v4l2()   \
 	imx_add_imx_pxp_v4l2()
 
+extern const struct imx_fsl_csi_data imx6sl_csi_data __initconst;
+#define imx6sl_add_fsl_csi()   \
+	imx_add_fsl_csi(&imx6sl_csi_data)
+
 extern const struct imx_epdc_data imx6dl_epdc_data __initconst;
 #define imx6dl_add_imx_epdc(pdata)	\
 	imx_add_imx_epdc(&imx6dl_epdc_data, pdata)
@@ -235,6 +243,9 @@ extern const struct imx_vdoa_data imx6q_vdoa_data __initconst;
 
 extern const struct imx_pcie_data imx6q_pcie_data __initconst;
 #define imx6q_add_pcie(pdata) imx_add_pcie(&imx6q_pcie_data, pdata)
+
+extern const struct imx_sja1000_data imx6q_sja1000_data __initconst;
+#define imx6q_add_sja1000(pdata) imx_add_sja1000(&imx6q_sja1000_data, pdata)
 
 #define imx6q_add_busfreq(pdata)	imx_add_busfreq(pdata)
 

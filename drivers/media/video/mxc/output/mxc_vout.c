@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -30,8 +30,8 @@
 
 #define UYVY_BLACK	(0x00800080)
 #define RGB_BLACK	(0x0)
-#define NV12_UV_BLACK	(0x80)
-#define NV12_Y_BLACK	(0x0)
+#define UV_BLACK	(0x80)
+#define Y_BLACK		(0x0)
 
 #define MAX_FB_NUM	6
 #define FB_BUFS		3
@@ -58,6 +58,16 @@
 	       ((vout)->task.input.crop.w == FRAME_WIDTH_1080P) &&	\
 	       ((vout)->task.input.height == FRAME_HEIGHT_1080P) &&	\
 	       ((vout)->task.input.crop.h == FRAME_HEIGHT_1080P))
+#define IS_PLANAR_PIXEL_FORMAT(format) \
+	(format == IPU_PIX_FMT_NV12 ||		\
+	    format == IPU_PIX_FMT_YUV420P2 ||	\
+	    format == IPU_PIX_FMT_YUV420P ||	\
+	    format == IPU_PIX_FMT_YVU420P ||	\
+	    format == IPU_PIX_FMT_YUV422P ||	\
+	    format == IPU_PIX_FMT_YVU422P ||	\
+	    format == IPU_PIX_FMT_YUV444P)
+
+#define NSEC_PER_FRAME_30FPS		(33333333)
 
 struct mxc_vout_fb {
 	char *name;
@@ -108,11 +118,12 @@ struct mxc_vout_output {
 	struct dma_mem vdoa_output[VDOA_FB_BUFS];
 
 	bool timer_stop;
-	struct timer_list timer;
+	struct hrtimer timer;
 	struct workqueue_struct *v4l_wq;
 	struct work_struct disp_work;
 	unsigned long frame_count;
-	unsigned long start_jiffies;
+	unsigned long vdi_frame_cnt;
+	ktime_t start_ktime;
 
 	int ctrl_rotate;
 	int ctrl_vflip;
@@ -120,7 +131,8 @@ struct mxc_vout_output {
 
 	dma_addr_t disp_bufs[FB_BUFS];
 
-	struct videobuf_buffer *pre_vb;
+	struct videobuf_buffer *pre1_vb;
+	struct videobuf_buffer *pre2_vb;
 };
 
 struct mxc_vout_dev {
@@ -135,6 +147,7 @@ struct mxc_vout_dev {
 
 /* Variables configurable through module params*/
 static int debug;
+static int vdi_rate_double;
 static int video_nr = 16;
 
 /* Module parameters */
@@ -142,8 +155,10 @@ module_param(video_nr, int, S_IRUGO);
 MODULE_PARM_DESC(video_nr, "video device numbers");
 module_param(debug, int, 0600);
 MODULE_PARM_DESC(debug, "Debug level (0-1)");
+module_param(vdi_rate_double, int, 0600);
+MODULE_PARM_DESC(vdi_rate_double, "vdi frame rate double on/off");
 
-const static struct v4l2_fmtdesc mxc_formats[] = {
+static const struct v4l2_fmtdesc mxc_formats[] = {
 	{
 		.description = "RGB565",
 		.pixelformat = V4L2_PIX_FMT_RGB565,
@@ -189,6 +204,10 @@ const static struct v4l2_fmtdesc mxc_formats[] = {
 		.pixelformat = V4L2_PIX_FMT_YUV420,
 	},
 	{
+		.description = "YVU420",
+		.pixelformat = V4L2_PIX_FMT_YVU420,
+	},
+	{
 		.description = "TILED NV12P",
 		.pixelformat = IPU_PIX_FMT_TILED_NV12,
 	},
@@ -207,7 +226,8 @@ const static struct v4l2_fmtdesc mxc_formats[] = {
 #define DEF_INPUT_WIDTH		320
 #define DEF_INPUT_HEIGHT	240
 
-static int mxc_vidioc_streamoff(struct file *file, void *fh, enum v4l2_buf_type i);
+static int mxc_vidioc_streamoff(struct file *file, void *fh,
+					enum v4l2_buf_type i);
 
 static struct mxc_vout_fb g_fb_setting[MAX_FB_NUM];
 static int config_disp_output(struct mxc_vout_output *vout);
@@ -341,7 +361,8 @@ static int update_setting_from_fbi(struct mxc_vout_output *vout,
 			if (!strcmp(fbi->fix.id, g_fb_setting[i].name)) {
 				vout->crop_bounds = g_fb_setting[i].crop_bounds;
 				vout->disp_fmt = g_fb_setting[i].disp_fmt;
-				vout->disp_support_csc = g_fb_setting[i].disp_support_csc;
+				vout->disp_support_csc =
+					g_fb_setting[i].disp_support_csc;
 				vout->disp_support_windows =
 					g_fb_setting[i].disp_support_windows;
 				found = true;
@@ -410,6 +431,48 @@ static bool deinterlace_3_field(struct mxc_vout_output *vout)
 		(vout->task.input.deinterlace.motion != HIGH_MOTION));
 }
 
+static int set_field_fmt(struct mxc_vout_output *vout, enum v4l2_field field)
+{
+	struct ipu_deinterlace *deinterlace = &vout->task.input.deinterlace;
+
+	switch (field) {
+	/* Images are in progressive format, not interlaced */
+	case V4L2_FIELD_NONE:
+	case V4L2_FIELD_ANY:
+		deinterlace->enable = false;
+		deinterlace->field_fmt = 0;
+		v4l2_dbg(1, debug, vout->vfd->v4l2_dev, "Progressive frame.\n");
+		break;
+	case V4L2_FIELD_INTERLACED_TB:
+		v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
+				"Enable deinterlace TB.\n");
+		deinterlace->enable = true;
+		deinterlace->field_fmt = IPU_DEINTERLACE_FIELD_TOP;
+		break;
+	case V4L2_FIELD_INTERLACED_BT:
+		v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
+				"Enable deinterlace BT.\n");
+		deinterlace->enable = true;
+		deinterlace->field_fmt = IPU_DEINTERLACE_FIELD_BOTTOM;
+		break;
+	default:
+		v4l2_err(vout->vfd->v4l2_dev,
+			"field format:%d not supported yet!\n", field);
+		return -EINVAL;
+	}
+
+	if (IPU_PIX_FMT_TILED_NV12F == vout->task.input.format) {
+		v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
+				"tiled fmt enable deinterlace.\n");
+		deinterlace->enable = true;
+	}
+
+	if (deinterlace->enable && vdi_rate_double)
+		deinterlace->field_fmt |= IPU_DEINTERLACE_RATE_EN;
+
+	return 0;
+}
+
 static bool is_pp_bypass(struct mxc_vout_output *vout)
 {
 	if ((IPU_PIX_FMT_TILED_NV12 == vout->task.input.format) ||
@@ -425,11 +488,15 @@ static bool is_pp_bypass(struct mxc_vout_output *vout)
 			return true;
 		else if (!need_csc(vout->task.input.format, vout->disp_fmt))
 			return true;
-	/* input crop show to full output which can show based on xres_virtual/yres_virtual */
+	/*
+	 * input crop show to full output which can show based on
+	 * xres_virtual/yres_virtual
+	 */
 	} else if ((vout->task.input.crop.w == vout->task.output.crop.w) &&
 			(vout->task.output.crop.w == vout->task.output.width) &&
 			(vout->task.input.crop.h == vout->task.output.crop.h) &&
-			(vout->task.output.crop.h == vout->task.output.height) &&
+			(vout->task.output.crop.h ==
+				vout->task.output.height) &&
 			(vout->task.output.rotate < IPU_ROTATE_HORIZ_FLIP) &&
 			!vout->task.input.deinterlace.enable) {
 		if (vout->disp_support_csc)
@@ -443,29 +510,26 @@ static bool is_pp_bypass(struct mxc_vout_output *vout)
 static void setup_buf_timer(struct mxc_vout_output *vout,
 			struct videobuf_buffer *vb)
 {
-	unsigned long timeout;
+	ktime_t expiry_time, now;
 
 	/* if timestamp is 0, then default to 30fps */
-	if ((vb->ts.tv_sec == 0)
-			&& (vb->ts.tv_usec == 0)
-			&& vout->start_jiffies)
-		timeout =
-			vout->start_jiffies + vout->frame_count * HZ / 30;
+	if ((vb->ts.tv_sec == 0) && (vb->ts.tv_usec == 0))
+		expiry_time = ktime_add_ns(vout->start_ktime,
+				NSEC_PER_FRAME_30FPS * vout->frame_count);
 	else
-		timeout = get_jiffies(&vb->ts);
+		expiry_time = timeval_to_ktime(vb->ts);
 
-	if (jiffies >= timeout) {
+	now = hrtimer_cb_get_time(&vout->timer);
+	if ((now.tv64 > expiry_time.tv64)) {
 		v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
 				"warning: timer timeout already expired.\n");
+		expiry_time = now;
 	}
 
-	if (mod_timer(&vout->timer, timeout)) {
-		v4l2_warn(vout->vfd->v4l2_dev,
-				"warning: timer was already set\n");
-	}
+	hrtimer_start(&vout->timer, expiry_time, HRTIMER_MODE_ABS);
 
-	v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
-			"timer handler next schedule: %lu\n", timeout);
+	v4l2_dbg(1, debug, vout->vfd->v4l2_dev, "timer handler next "
+		"schedule: %lldnsecs\n", expiry_time.tv64);
 }
 
 static int show_buf(struct mxc_vout_output *vout, int idx,
@@ -489,12 +553,14 @@ static int show_buf(struct mxc_vout_output *vout, int idx,
 		fbi->var.yoffset = ipos->y + 1;
 		var.xoffset = ipos->x;
 		var.yoffset = ipos->y;
+		var.vmode |= FB_VMODE_YWRAP;
 		ret = fb_pan_display(fbi, &var);
 		fbi->fix.smem_start = fb_base;
 		console_unlock();
 	} else {
 		console_lock();
 		var.yoffset = idx * fbi->var.yres;
+		var.vmode &= ~FB_VMODE_YWRAP;
 		ret = fb_pan_display(fbi, &var);
 		console_unlock();
 	}
@@ -512,6 +578,9 @@ static void disp_work_func(struct work_struct *work)
 	struct ipu_pos ipos;
 	int ret = 0;
 	u32 in_fmt = 0;
+	u32 vdi_cnt = 0;
+	u32 vdi_frame;
+	u32 index = 0;
 	u32 ocrop_h = 0;
 	u32 o_height = 0;
 	u32 tiled_interlaced = 0;
@@ -521,37 +590,67 @@ static void disp_work_func(struct work_struct *work)
 
 	spin_lock_irqsave(q->irqlock, flags);
 
-	if (deinterlace_3_field(vout)) {
-		if (list_is_singular(&vout->active_list)) {
-			v4l2_warn(vout->vfd->v4l2_dev,
-					"deinterlacing: no enough entry in active_list\n");
-			spin_unlock_irqrestore(q->irqlock, flags);
-			return;
-		}
-	} else {
-		if (list_empty(&vout->active_list)) {
-			v4l2_warn(vout->vfd->v4l2_dev,
-					"no entry in active_list, should not be here\n");
-			spin_unlock_irqrestore(q->irqlock, flags);
-			return;
-		}
+	if (list_empty(&vout->active_list)) {
+		v4l2_warn(vout->vfd->v4l2_dev,
+			"no entry in active_list, should not be here\n");
+		spin_unlock_irqrestore(q->irqlock, flags);
+		return;
 	}
+
 	vb = list_first_entry(&vout->active_list,
 			struct videobuf_buffer, queue);
+	ret = set_field_fmt(vout, vb->field);
+	if (ret < 0) {
+		spin_unlock_irqrestore(q->irqlock, flags);
+		return;
+	}
+	if (deinterlace_3_field(vout)) {
+		if (list_is_singular(&vout->active_list)) {
+			if (list_empty(&vout->queue_list)) {
+				vout->timer_stop = true;
+				spin_unlock_irqrestore(q->irqlock, flags);
+				v4l2_warn(vout->vfd->v4l2_dev,
+					"no enough entry for 3 fields "
+					"deinterlacer\n");
+				return;
+			}
 
-	if (deinterlace_3_field(vout))
-		vb_next = list_first_entry(vout->active_list.next,
-				struct videobuf_buffer, queue);
+			/*
+			 * We need to use the next vb even if it is
+			 * not on the active list.
+			 */
+			vb_next = list_first_entry(&vout->queue_list,
+					struct videobuf_buffer, queue);
+		} else
+			vb_next = list_first_entry(vout->active_list.next,
+						struct videobuf_buffer, queue);
+		v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
+			"cur field_fmt:%d, next field_fmt:%d.\n",
+			vb->field, vb_next->field);
+		/* repeat the last field during field format changing */
+		if ((vb->field != vb_next->field) &&
+			(vb_next->field != V4L2_FIELD_NONE))
+			vb_next = vb;
+	}
 
 	spin_unlock_irqrestore(q->irqlock, flags);
 
+vdi_frame_rate_double:
 	mutex_lock(&vout->task_lock);
 
+	v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
+		"v4l2 frame_cnt:%ld, vb_field:%d, fmt:%d\n",
+		vout->frame_count, vb->field,
+		vout->task.input.deinterlace.field_fmt);
 	if (vb->memory == V4L2_MEMORY_USERPTR)
 		vout->task.input.paddr = vb->baddr;
 	else
 		vout->task.input.paddr = videobuf_to_dma_contig(vb);
 
+	if (vout->task.input.deinterlace.field_fmt & IPU_DEINTERLACE_RATE_EN)
+		index = vout->vdi_frame_cnt % FB_BUFS;
+	else
+		index = vout->frame_count % FB_BUFS;
 	if (vout->linear_bypass_pp) {
 		vout->task.output.paddr = vout->task.input.paddr;
 		ipos.x = vout->task.input.crop.pos.x;
@@ -564,15 +663,15 @@ static void disp_work_func(struct work_struct *work)
 				vout->task.input.paddr_n =
 					videobuf_to_dma_contig(vb_next);
 		}
-		vout->task.output.paddr =
-			vout->disp_bufs[vout->frame_count % FB_BUFS];
+		vout->task.output.paddr = vout->disp_bufs[index];
 		if (vout->vdoa_1080p) {
 			o_height =  vout->task.output.height;
 			ocrop_h = vout->task.output.crop.h;
 			vout->task.output.height = FRAME_HEIGHT_1080P;
 			vout->task.output.crop.h = FRAME_HEIGHT_1080P;
 		}
-		tiled_fmt = (IPU_PIX_FMT_TILED_NV12 == vout->task.input.format) ||
+		tiled_fmt =
+			(IPU_PIX_FMT_TILED_NV12 == vout->task.input.format) ||
 			(IPU_PIX_FMT_TILED_NV12F == vout->task.input.format);
 		if (vout->tiled_bypass_pp) {
 			ipos.x = vout->task.input.crop.pos.x;
@@ -615,30 +714,52 @@ static void disp_work_func(struct work_struct *work)
 
 	mutex_unlock(&vout->task_lock);
 
-	ret = show_buf(vout, vout->frame_count % FB_BUFS, &ipos);
+	ret = show_buf(vout, index, &ipos);
 	if (ret < 0)
-		v4l2_dbg(1, debug, vout->vfd->v4l2_dev, "show buf with ret %d\n", ret);
+		v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
+			"show buf with ret %d\n", ret);
 
+	if (vout->task.input.deinterlace.field_fmt & IPU_DEINTERLACE_RATE_EN) {
+		vdi_frame = vout->task.input.deinterlace.field_fmt
+				& IPU_DEINTERLACE_RATE_FRAME1;
+		if (vdi_frame)
+			vout->task.input.deinterlace.field_fmt &=
+			~IPU_DEINTERLACE_RATE_FRAME1;
+		else
+			vout->task.input.deinterlace.field_fmt |=
+			IPU_DEINTERLACE_RATE_FRAME1;
+		vout->vdi_frame_cnt++;
+		vdi_cnt++;
+		if (vdi_cnt < IPU_DEINTERLACE_MAX_FRAME)
+			goto vdi_frame_rate_double;
+	}
 	spin_lock_irqsave(q->irqlock, flags);
 
 	list_del(&vb->queue);
 
 	/*
-	 * previous videobuf finish show, set VIDEOBUF_DONE state here
-	 * to avoid tearing issue in pp bypass case, which make sure
-	 * showing buffer will not be dequeue to write new data. It also
-	 * bring side-effect that the last buffer can not be dequeue
-	 * correctly, app need take care about it.
+	 * The videobuf before the last one has been shown. Set
+	 * VIDEOBUF_DONE state here to avoid tearing issue in ic bypass
+	 * case, which makes sure a buffer being shown will not be
+	 * dequeued to be overwritten. It also brings side-effect that
+	 * the last 2 buffers can not be dequeued correctly, apps need
+	 * to take care of it.
 	 */
-	if (vout->pre_vb) {
-		vout->pre_vb->state = VIDEOBUF_DONE;
-		wake_up_interruptible(&vout->pre_vb->done);
+	if (vout->pre2_vb) {
+		vout->pre2_vb->state = VIDEOBUF_DONE;
+		wake_up_interruptible(&vout->pre2_vb->done);
+		vout->pre2_vb = NULL;
 	}
 
-	if (vout->linear_bypass_pp)
-		vout->pre_vb = vb;
-	else {
-		vout->pre_vb = NULL;
+	if (vout->linear_bypass_pp) {
+		vout->pre2_vb = vout->pre1_vb;
+		vout->pre1_vb = vb;
+	} else {
+		if (vout->pre1_vb) {
+			vout->pre1_vb->state = VIDEOBUF_DONE;
+			wake_up_interruptible(&vout->pre1_vb->done);
+			vout->pre1_vb = NULL;
+		}
 		vb->state = VIDEOBUF_DONE;
 		wake_up_interruptible(&vb->done);
 	}
@@ -666,10 +787,11 @@ err:
 	return;
 }
 
-static void mxc_vout_timer_handler(unsigned long arg)
+static enum hrtimer_restart mxc_vout_timer_handler(struct hrtimer *timer)
 {
-	struct mxc_vout_output *vout =
-			(struct mxc_vout_output *) arg;
+	struct mxc_vout_output *vout = container_of(timer,
+						    struct mxc_vout_output,
+						    timer);
 	struct videobuf_queue *q = &vout->vbq;
 	struct videobuf_buffer *vb;
 	unsigned long flags = 0;
@@ -682,7 +804,7 @@ static void mxc_vout_timer_handler(unsigned long arg)
 	 */
 	if (list_empty(&vout->queue_list)) {
 		spin_unlock_irqrestore(q->irqlock, flags);
-		return;
+		return HRTIMER_NORESTART;
 	}
 
 	/* move videobuf from queued list to active list */
@@ -693,16 +815,18 @@ static void mxc_vout_timer_handler(unsigned long arg)
 
 	if (queue_work(vout->v4l_wq, &vout->disp_work) == 0) {
 		v4l2_warn(vout->vfd->v4l2_dev,
-			"disp work was in queue already, queue buf again next time\n");
+		"disp work was in queue already, queue buf again next time\n");
 		list_del(&vb->queue);
 		list_add(&vb->queue, &vout->queue_list);
 		spin_unlock_irqrestore(q->irqlock, flags);
-		return;
+		return HRTIMER_NORESTART;
 	}
 
 	vb->state = VIDEOBUF_ACTIVE;
 
 	spin_unlock_irqrestore(q->irqlock, flags);
+
+	return HRTIMER_NORESTART;
 }
 
 /* Video buffer call backs */
@@ -755,21 +879,21 @@ static void mxc_vout_buffer_queue(struct videobuf_queue *q,
 			  struct videobuf_buffer *vb)
 {
 	struct mxc_vout_output *vout = q->priv_data;
+	struct videobuf_buffer *active_vb;
 
 	list_add_tail(&vb->queue, &vout->queue_list);
 	vb->state = VIDEOBUF_QUEUED;
 
 	if (vout->timer_stop) {
 		if (deinterlace_3_field(vout) &&
-			list_empty(&vout->active_list)) {
-			vb = list_first_entry(&vout->queue_list,
+			!list_empty(&vout->active_list)) {
+			active_vb = list_first_entry(&vout->active_list,
 					struct videobuf_buffer, queue);
-			list_del(&vb->queue);
-			list_add_tail(&vb->queue, &vout->active_list);
+			setup_buf_timer(vout, active_vb);
 		} else {
 			setup_buf_timer(vout, vb);
-			vout->timer_stop = false;
 		}
+		vout->timer_stop = false;
 	}
 }
 
@@ -858,9 +982,11 @@ static int mxc_vout_open(struct file *file)
 
 		vout->fmt_init = false;
 		vout->frame_count = 0;
+		vout->vdi_frame_cnt = 0;
 
 		vout->win_pos.x = 0;
 		vout->win_pos.y = 0;
+		vout->release = true;
 	}
 
 	file->private_data = vout;
@@ -946,7 +1072,8 @@ again:
 			if (ret == IPU_CHECK_ERR_SPLIT_OUTPUTW_OVER) {
 				if (vout->disp_support_windows) {
 					task->output.width -= 8;
-					task->output.crop.w = task->output.width;
+					task->output.crop.w =
+						task->output.width;
 				} else
 					task->output.crop.w -= 8;
 				goto again;
@@ -954,7 +1081,8 @@ again:
 			if (ret == IPU_CHECK_ERR_SPLIT_OUTPUTH_OVER) {
 				if (vout->disp_support_windows) {
 					task->output.height -= 8;
-					task->output.crop.h = task->output.height;
+					task->output.crop.h =
+						task->output.height;
 				} else
 					task->output.crop.h -= 8;
 				goto again;
@@ -973,6 +1101,7 @@ static inline int vdoaipu_try_task(struct mxc_vout_output *vout)
 	int is_1080p_stream;
 	size_t size;
 	struct ipu_task *ipu_task = &vout->task;
+	struct ipu_crop *icrop = &ipu_task->input.crop;
 	struct ipu_task *vdoa_task = &vout->vdoa_task;
 	u32 deinterlace = 0;
 	u32 in_fmt;
@@ -981,15 +1110,23 @@ static inline int vdoaipu_try_task(struct mxc_vout_output *vout)
 		deinterlace = 1;
 
 	memset(vdoa_task, 0, sizeof(*vdoa_task));
-	memcpy(&vdoa_task->input, &ipu_task->input, sizeof(ipu_task->input));
 	vdoa_task->output.format = IPU_PIX_FMT_NV12;
-	vdoa_task->output.width = ipu_task->input.crop.w;
-	vdoa_task->output.height = ipu_task->input.crop.h;
-	vdoa_task->output.crop.w = ipu_task->input.crop.w;
-	vdoa_task->output.crop.h = ipu_task->input.crop.h;
+	memcpy(&vdoa_task->input, &ipu_task->input,
+			sizeof(ipu_task->input));
+	if ((icrop->w % IPU_PIX_FMT_TILED_NV12_MBALIGN) ||
+		(icrop->h % IPU_PIX_FMT_TILED_NV12_MBALIGN)) {
+		vdoa_task->input.crop.w =
+			ALIGN(icrop->w, IPU_PIX_FMT_TILED_NV12_MBALIGN);
+		vdoa_task->input.crop.h =
+			ALIGN(icrop->h, IPU_PIX_FMT_TILED_NV12_MBALIGN);
+	}
+	vdoa_task->output.width = vdoa_task->input.crop.w;
+	vdoa_task->output.height = vdoa_task->input.crop.h;
+	vdoa_task->output.crop.w = vdoa_task->input.crop.w;
+	vdoa_task->output.crop.h = vdoa_task->input.crop.h;
 
-	size = PAGE_ALIGN(ipu_task->input.crop.w *
-					ipu_task->input.crop.h *
+	size = PAGE_ALIGN(vdoa_task->input.crop.w *
+					vdoa_task->input.crop.h *
 					fmt_to_bpp(vdoa_task->output.format)/8);
 	if (size > vout->vdoa_work.size) {
 		if (vout->vdoa_work.vaddr)
@@ -1029,6 +1166,7 @@ static int mxc_vout_try_task(struct mxc_vout_output *vout)
 	u32 o_height = 0;
 	u32 ocrop_h = 0;
 	bool tiled_fmt = false;
+	bool tiled_need_pp = false;
 
 	vout->vdoa_1080p = CHECK_TILED_1080P_DISPLAY(vout);
 	if (vout->vdoa_1080p) {
@@ -1041,10 +1179,17 @@ static int mxc_vout_try_task(struct mxc_vout_output *vout)
 
 	if ((IPU_PIX_FMT_TILED_NV12 == input->format) ||
 		(IPU_PIX_FMT_TILED_NV12F == input->format)) {
-		crop->w -= crop->w % IPU_PIX_FMT_TILED_NV12_MBALIGN;
-		crop->h -= crop->h % IPU_PIX_FMT_TILED_NV12_MBALIGN;
-		crop->pos.x -= crop->pos.x % IPU_PIX_FMT_TILED_NV12_MBALIGN;
-		crop->pos.y -= crop->pos.y % IPU_PIX_FMT_TILED_NV12_MBALIGN;
+		if ((input->width % IPU_PIX_FMT_TILED_NV12_MBALIGN) ||
+			(input->height % IPU_PIX_FMT_TILED_NV12_MBALIGN) ||
+			(crop->pos.x % IPU_PIX_FMT_TILED_NV12_MBALIGN) ||
+			(crop->pos.y % IPU_PIX_FMT_TILED_NV12_MBALIGN)) {
+			v4l2_err(vout->vfd->v4l2_dev,
+				"ERR: tiled fmt needs 16 pixel align.\n");
+			return -EINVAL;
+		}
+		if ((crop->w % IPU_PIX_FMT_TILED_NV12_MBALIGN) ||
+			(crop->h % IPU_PIX_FMT_TILED_NV12_MBALIGN))
+			tiled_need_pp = true;
 	} else {
 		crop->w -= crop->w % 8;
 		crop->h -= crop->h % 8;
@@ -1072,7 +1217,8 @@ static int mxc_vout_try_task(struct mxc_vout_output *vout)
 		if ((IPU_PIX_FMT_TILED_NV12 == input->format) ||
 			(IPU_PIX_FMT_TILED_NV12F == input->format)) {
 			/* check resize/rotate/flip, or csc task */
-			if (!((IPU_ROTATE_NONE != output->rotate) ||
+			if (!(tiled_need_pp ||
+				(IPU_ROTATE_NONE != output->rotate) ||
 				(input->crop.w != output->crop.w) ||
 				(input->crop.h != output->crop.h) ||
 				(!vout->disp_support_csc &&
@@ -1108,7 +1254,8 @@ static int mxc_vout_try_task(struct mxc_vout_output *vout)
 	return ret;
 }
 
-static int mxc_vout_try_format(struct mxc_vout_output *vout, struct v4l2_format *f)
+static int mxc_vout_try_format(struct mxc_vout_output *vout,
+				struct v4l2_format *f)
 {
 	int ret = 0;
 	struct v4l2_rect rect;
@@ -1128,38 +1275,9 @@ static int mxc_vout_try_format(struct mxc_vout_output *vout, struct v4l2_format 
 	vout->task.input.height = f->fmt.pix.height;
 	vout->task.input.format = f->fmt.pix.pixelformat;
 
-	if (IPU_PIX_FMT_TILED_NV12F == vout->task.input.format) {
-		v4l2_dbg(1, debug, vout->vfd->v4l2_dev,
-				"tiled fmt enable deinterlace.\n");
-		vout->task.input.deinterlace.enable = true;
-		vout->task.input.deinterlace.field_fmt =
-				IPU_DEINTERLACE_FIELD_TOP;
-	}
-	switch (f->fmt.pix.field) {
-	/* Images are in progressive format, not interlaced */
-	case V4L2_FIELD_NONE:
-		break;
-	/* The two fields of a frame are passed in separate buffers,
-	   in temporal order, i. e. the older one first. */
-	case V4L2_FIELD_ALTERNATE:
-		v4l2_err(vout->vfd->v4l2_dev,
-			"V4L2_FIELD_ALTERNATE field format not supported yet!\n");
-		break;
-	case V4L2_FIELD_INTERLACED_TB:
-		v4l2_info(vout->vfd->v4l2_dev, "Enable deinterlace TB.\n");
-		vout->task.input.deinterlace.enable = true;
-		vout->task.input.deinterlace.field_fmt =
-				IPU_DEINTERLACE_FIELD_TOP;
-		break;
-	case V4L2_FIELD_INTERLACED_BT:
-		v4l2_info(vout->vfd->v4l2_dev, "Enable deinterlace BT.\n");
-		vout->task.input.deinterlace.enable = true;
-		vout->task.input.deinterlace.field_fmt =
-				IPU_DEINTERLACE_FIELD_BOTTOM;
-		break;
-	default:
-		break;
-	}
+	ret = set_field_fmt(vout, f->fmt.pix.field);
+	if (ret < 0)
+		return ret;
 
 	if (f->fmt.pix.priv) {
 		vout->task.input.crop.pos.x = rect.left;
@@ -1223,7 +1341,8 @@ static int mxc_vidioc_cropcap(struct file *file, void *fh,
 	return 0;
 }
 
-static int mxc_vidioc_g_crop(struct file *file, void *fh, struct v4l2_crop *crop)
+static int mxc_vidioc_g_crop(struct file *file, void *fh,
+				struct v4l2_crop *crop)
 {
 	struct mxc_vout_output *vout = fh;
 
@@ -1252,7 +1371,8 @@ static int mxc_vidioc_g_crop(struct file *file, void *fh, struct v4l2_crop *crop
 	return 0;
 }
 
-static int mxc_vidioc_s_crop(struct file *file, void *fh, struct v4l2_crop *crop)
+static int mxc_vidioc_s_crop(struct file *file, void *fh,
+				struct v4l2_crop *crop)
 {
 	struct mxc_vout_output *vout = fh;
 	struct v4l2_rect *b = &vout->crop_bounds;
@@ -1288,6 +1408,14 @@ static int mxc_vidioc_s_crop(struct file *file, void *fh, struct v4l2_crop *crop
 	/* stride line limitation */
 	crop->c.height -= crop->c.height % 8;
 	crop->c.width -= crop->c.width % 8;
+	if ((crop->c.width <= 0) || (crop->c.height <= 0) ||
+		((crop->c.left + crop->c.width) > (b->left + b->width)) ||
+		((crop->c.top + crop->c.height) > (b->top + b->height))) {
+		v4l2_err(vout->vfd->v4l2_dev, "s_crop err: %d, %d, %d, %d",
+			crop->c.left, crop->c.top,
+			crop->c.width, crop->c.height);
+		return -EINVAL;
+	}
 
 	/* the same setting, return */
 	if (vout->disp_support_windows) {
@@ -1306,7 +1434,7 @@ static int mxc_vidioc_s_crop(struct file *file, void *fh, struct v4l2_crop *crop
 
 	/* wait current work finish */
 	if (vout->vbq.streaming)
-		cancel_work_sync(&vout->disp_work);
+		flush_workqueue(vout->v4l_wq);
 
 	mutex_lock(&vout->task_lock);
 
@@ -1346,7 +1474,7 @@ static int mxc_vidioc_s_crop(struct file *file, void *fh, struct v4l2_crop *crop
 			ret = config_disp_output(vout);
 			if (ret < 0) {
 				v4l2_err(vout->vfd->v4l2_dev,
-						"Config display output failed\n");
+					"Config display output failed\n");
 				goto done;
 			}
 		}
@@ -1383,7 +1511,8 @@ static int mxc_vidioc_queryctrl(struct file *file, void *fh,
 	return ret;
 }
 
-static int mxc_vidioc_g_ctrl(struct file *file, void *fh, struct v4l2_control *ctrl)
+static int mxc_vidioc_g_ctrl(struct file *file, void *fh,
+				struct v4l2_control *ctrl)
 {
 	int ret = 0;
 	struct mxc_vout_output *vout = fh;
@@ -1451,14 +1580,15 @@ static void setup_task_rotation(struct mxc_vout_output *vout)
 	}
 }
 
-static int mxc_vidioc_s_ctrl(struct file *file, void *fh, struct v4l2_control *ctrl)
+static int mxc_vidioc_s_ctrl(struct file *file, void *fh,
+				struct v4l2_control *ctrl)
 {
 	int ret = 0;
 	struct mxc_vout_output *vout = fh;
 
 	/* wait current work finish */
 	if (vout->vbq.streaming)
-		cancel_work_sync(&vout->disp_work);
+		flush_workqueue(vout->v4l_wq);
 
 	mutex_lock(&vout->task_lock);
 	switch (ctrl->id) {
@@ -1508,7 +1638,7 @@ static int mxc_vidioc_s_ctrl(struct file *file, void *fh, struct v4l2_control *c
 			ret = config_disp_output(vout);
 			if (ret < 0) {
 				v4l2_err(vout->vfd->v4l2_dev,
-						"Config display output failed\n");
+					"Config display output failed\n");
 				goto done;
 			}
 		}
@@ -1577,7 +1707,8 @@ static int mxc_vidioc_dqbuf(struct file *file, void *fh, struct v4l2_buffer *b)
 		return videobuf_dqbuf(&vout->vbq, (struct v4l2_buffer *)b, 0);
 }
 
-static int set_window_position(struct mxc_vout_output *vout, struct mxcfb_pos *pos)
+static int set_window_position(struct mxc_vout_output *vout,
+				struct mxcfb_pos *pos)
 {
 	struct fb_info *fbi = vout->fbi;
 	mm_segment_t old_fs;
@@ -1657,7 +1788,10 @@ static int config_disp_output(struct mxc_vout_output *vout)
 				"ERR:%s fb_set_var ret:%d\n", __func__, ret);
 		return ret;
 	}
-	display_buf_size = fbi->fix.line_length * fbi->var.yres;
+	if (vout->linear_bypass_pp || vout->tiled_bypass_pp)
+		display_buf_size = fbi->fix.line_length * fbi->var.yres_virtual;
+	else
+		display_buf_size = fbi->fix.line_length * fbi->var.yres;
 	for (i = 0; i < fb_num; i++)
 		vout->disp_bufs[i] = fbi->fix.smem_start + i * display_buf_size;
 	if (vout->tiled_bypass_pp) {
@@ -1690,11 +1824,11 @@ static int config_disp_output(struct mxc_vout_output *vout)
 	/* fill black when video config changed */
 	color = colorspaceofpixel(vout->task.output.format) == YUV_CS ?
 			UYVY_BLACK : RGB_BLACK;
-	if (vout->task.output.format == IPU_PIX_FMT_NV12) {
+	if (IS_PLANAR_PIXEL_FORMAT(vout->task.output.format)) {
 		size = display_buf_size * 8 /
 			fmt_to_bpp(vout->task.output.format);
-		memset(fbi->screen_base, NV12_Y_BLACK, size);
-		memset(fbi->screen_base + size, NV12_UV_BLACK,
+		memset(fbi->screen_base, Y_BLACK, size);
+		memset(fbi->screen_base + size, UV_BLACK,
 				display_buf_size - size);
 	} else {
 		pixel = (u32 *)fbi->screen_base;
@@ -1716,6 +1850,22 @@ err:
 			free_dma_buf(vout, buf);
 	}
 	return ret;
+}
+
+static inline void wait_for_vsync(struct mxc_vout_output *vout)
+{
+	struct fb_info *fbi = vout->fbi;
+	mm_segment_t old_fs;
+
+	if (fbi->fbops->fb_ioctl) {
+		old_fs = get_fs();
+		set_fs(KERNEL_DS);
+		fbi->fbops->fb_ioctl(fbi, MXCFB_WAIT_FOR_VSYNC,
+				(unsigned long)NULL);
+		set_fs(old_fs);
+	}
+
+	return;
 }
 
 static void release_disp_output(struct mxc_vout_output *vout)
@@ -1749,7 +1899,8 @@ static void release_disp_output(struct mxc_vout_output *vout)
 	vout->release = true;
 }
 
-static int mxc_vidioc_streamon(struct file *file, void *fh, enum v4l2_buf_type i)
+static int mxc_vidioc_streamon(struct file *file, void *fh,
+				enum v4l2_buf_type i)
 {
 	struct mxc_vout_output *vout = fh;
 	struct videobuf_queue *q = &vout->vbq;
@@ -1764,7 +1915,7 @@ static int mxc_vidioc_streamon(struct file *file, void *fh, enum v4l2_buf_type i
 
 	if (deinterlace_3_field(vout) && list_is_singular(&q->stream)) {
 		v4l2_err(vout->vfd->v4l2_dev,
-				"deinterlacing: need queue 2 frame before streamon\n");
+			"deinterlacing: need queue 2 frame before streamon\n");
 		ret = -EINVAL;
 		goto done;
 	}
@@ -1776,31 +1927,39 @@ static int mxc_vidioc_streamon(struct file *file, void *fh, enum v4l2_buf_type i
 		goto done;
 	}
 
-	init_timer(&vout->timer);
+	hrtimer_init(&vout->timer, CLOCK_REALTIME, HRTIMER_MODE_ABS);
 	vout->timer.function = mxc_vout_timer_handler;
-	vout->timer.data = (unsigned long)vout;
 	vout->timer_stop = true;
 
-	vout->start_jiffies = jiffies;
+	vout->start_ktime = hrtimer_cb_get_time(&vout->timer);
 
-	vout->pre_vb = NULL;
+	vout->pre1_vb = NULL;
+	vout->pre2_vb = NULL;
 
 	ret = videobuf_streamon(q);
 done:
 	return ret;
 }
 
-static int mxc_vidioc_streamoff(struct file *file, void *fh, enum v4l2_buf_type i)
+static int mxc_vidioc_streamoff(struct file *file, void *fh,
+				enum v4l2_buf_type i)
 {
 	struct mxc_vout_output *vout = fh;
 	struct videobuf_queue *q = &vout->vbq;
 	int ret = 0;
 
 	if (q->streaming) {
-		cancel_work_sync(&vout->disp_work);
 		flush_workqueue(vout->v4l_wq);
 
-		del_timer_sync(&vout->timer);
+		hrtimer_cancel(&vout->timer);
+
+		/*
+		 * Wait for 2 vsyncs to make sure
+		 * frames are drained on triple
+		 * buffer.
+		 */
+		wait_for_vsync(vout);
+		wait_for_vsync(vout);
 
 		release_disp_output(vout);
 
@@ -1813,16 +1972,16 @@ static int mxc_vidioc_streamoff(struct file *file, void *fh, enum v4l2_buf_type 
 }
 
 static const struct v4l2_ioctl_ops mxc_vout_ioctl_ops = {
-	.vidioc_querycap      			= mxc_vidioc_querycap,
-	.vidioc_enum_fmt_vid_out 		= mxc_vidioc_enum_fmt_vid_out,
+	.vidioc_querycap			= mxc_vidioc_querycap,
+	.vidioc_enum_fmt_vid_out		= mxc_vidioc_enum_fmt_vid_out,
 	.vidioc_g_fmt_vid_out			= mxc_vidioc_g_fmt_vid_out,
 	.vidioc_s_fmt_vid_out			= mxc_vidioc_s_fmt_vid_out,
 	.vidioc_cropcap				= mxc_vidioc_cropcap,
 	.vidioc_g_crop				= mxc_vidioc_g_crop,
 	.vidioc_s_crop				= mxc_vidioc_s_crop,
-	.vidioc_queryctrl    			= mxc_vidioc_queryctrl,
-	.vidioc_g_ctrl       			= mxc_vidioc_g_ctrl,
-	.vidioc_s_ctrl       			= mxc_vidioc_s_ctrl,
+	.vidioc_queryctrl			= mxc_vidioc_queryctrl,
+	.vidioc_g_ctrl				= mxc_vidioc_g_ctrl,
+	.vidioc_s_ctrl				= mxc_vidioc_s_ctrl,
 	.vidioc_reqbufs				= mxc_vidioc_reqbufs,
 	.vidioc_querybuf			= mxc_vidioc_querybuf,
 	.vidioc_qbuf				= mxc_vidioc_qbuf,
@@ -1832,17 +1991,17 @@ static const struct v4l2_ioctl_ops mxc_vout_ioctl_ops = {
 };
 
 static const struct v4l2_file_operations mxc_vout_fops = {
-	.owner 		= THIS_MODULE,
+	.owner		= THIS_MODULE,
 	.unlocked_ioctl	= video_ioctl2,
-	.mmap 		= mxc_vout_mmap,
-	.open 		= mxc_vout_open,
-	.release 	= mxc_vout_release,
+	.mmap		= mxc_vout_mmap,
+	.open		= mxc_vout_open,
+	.release	= mxc_vout_release,
 };
 
 static struct video_device mxc_vout_template = {
-	.name 		= "MXC Video Output",
+	.name		= "MXC Video Output",
 	.fops           = &mxc_vout_fops,
-	.ioctl_ops 	= &mxc_vout_ioctl_ops,
+	.ioctl_ops	= &mxc_vout_ioctl_ops,
 	.release	= video_device_release,
 };
 
@@ -1952,9 +2111,13 @@ static int mxc_vout_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	dev->dev = &pdev->dev;
-	dev->dev->dma_mask = kmalloc(sizeof(*dev->dev->dma_mask), GFP_KERNEL);
-	*dev->dev->dma_mask = DMA_BIT_MASK(32);
-	dev->dev->coherent_dma_mask = DMA_BIT_MASK(32);
+	if (!dev->dev->dma_mask) {
+		dev->dev->dma_mask = kmalloc(sizeof(*dev->dev->dma_mask),
+					     GFP_KERNEL);
+		if (dev->dev->dma_mask)
+			*dev->dev->dma_mask = DMA_BIT_MASK(32);
+		dev->dev->coherent_dma_mask = DMA_BIT_MASK(32);
+	}
 
 	ret = v4l2_device_register(dev->dev, &dev->v4l2_dev);
 	if (ret) {

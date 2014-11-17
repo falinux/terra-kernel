@@ -28,6 +28,8 @@
 #include "11n.h"
 #include "sdio.h"
 
+#define DEBUG
+#include <linux/kernel.h>
 
 #define SDIO_VERSION	"1.0"
 
@@ -1751,4 +1753,5 @@ MODULE_AUTHOR("Marvell International Ltd.");
 MODULE_DESCRIPTION("Marvell WiFi-Ex SDIO Driver version " SDIO_VERSION);
 MODULE_VERSION(SDIO_VERSION);
 MODULE_LICENSE("GPL v2");
-MODULE_FIRMWARE("sd8787.bin");
+//MODULE_FIRMWARE("sd8787.bin");
+MODULE_FIRMWARE("mrvl/sd8787_uapsta.bin");

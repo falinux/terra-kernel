@@ -1,6 +1,6 @@
 /****************************************************************************
 *
-*    Copyright (C) 2005 - 2012 by Vivante Corp.
+*    Copyright (C) 2005 - 2013 by Vivante Corp.
 *
 *    This program is free software; you can redistribute it and/or modify
 *    it under the terms of the GNU General Public License as published by
@@ -17,8 +17,6 @@
 *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 *
 *****************************************************************************/
-
-
 
 
 #include "gc_hal_kernel_precomp.h"
@@ -97,6 +95,30 @@ gcsQUEUE_UPDATE_CONTROL;
 /******************************************************************************\
 ********************************* Support Code *********************************
 \******************************************************************************/
+static gceSTATUS
+_FlushMMU(
+    IN gckVGCOMMAND Command
+    )
+{
+    gceSTATUS status;
+    gctUINT32 oldValue;
+    gckVGHARDWARE hardware = Command->hardware;
+
+    gcmkONERROR(gckOS_AtomicExchange(Command->os,
+                                     hardware->pageTableDirty,
+                                     0,
+                                     &oldValue));
+
+    if (oldValue)
+    {
+        /* Page Table is upated, flush mmu before commit. */
+        gcmkONERROR(gckVGHARDWARE_FlushMMU(hardware));
+    }
+
+    return gcvSTATUS_OK;
+OnError:
+    return status;
+}
 
 static gceSTATUS
 _WaitForIdle(
@@ -577,6 +599,67 @@ _FreeTaskContainer(
     }
 }
 
+gceSTATUS
+_RemoveRecordFromProcesDB(
+    IN gckVGCOMMAND Command,
+    IN gcsTASK_HEADER_PTR Task
+    )
+{
+    gcsTASK_PTR task = (gcsTASK_PTR)((gctUINT8_PTR)Task - sizeof(gcsTASK));
+    gcsTASK_FREE_VIDEO_MEMORY_PTR freeVideoMemory;
+    gcsTASK_UNLOCK_VIDEO_MEMORY_PTR unlockVideoMemory;
+    gctINT pid;
+    gctUINT32 size;
+
+    /* Get the total size of all tasks. */
+    size = task->size;
+
+    gcmkVERIFY_OK(gckOS_GetProcessID((gctUINT32_PTR)&pid));
+
+    do
+    {
+        switch (Task->id)
+        {
+        case gcvTASK_FREE_VIDEO_MEMORY:
+            freeVideoMemory = (gcsTASK_FREE_VIDEO_MEMORY_PTR)Task;
+
+            /* Remove record from process db. */
+            gcmkVERIFY_OK(gckKERNEL_RemoveProcessDB(
+                Command->kernel->kernel,
+                pid,
+                gcvDB_VIDEO_MEMORY,
+                gcmUINT64_TO_PTR(freeVideoMemory->node)));
+
+            /* Advance to next task. */
+            size -= sizeof(gcsTASK_FREE_VIDEO_MEMORY);
+            Task = (gcsTASK_HEADER_PTR)(freeVideoMemory + 1);
+
+            break;
+        case gcvTASK_UNLOCK_VIDEO_MEMORY:
+            unlockVideoMemory = (gcsTASK_UNLOCK_VIDEO_MEMORY_PTR)Task;
+
+            /* Remove record from process db. */
+            gcmkVERIFY_OK(gckKERNEL_RemoveProcessDB(
+                Command->kernel->kernel,
+                pid,
+                gcvDB_VIDEO_MEMORY_LOCKED,
+                gcmUINT64_TO_PTR(unlockVideoMemory->node)));
+
+            /* Advance to next task. */
+            size -= sizeof(gcsTASK_UNLOCK_VIDEO_MEMORY);
+            Task = (gcsTASK_HEADER_PTR)(unlockVideoMemory + 1);
+
+            break;
+        default:
+            /* Skip the whole task. */
+            size = 0;
+            break;
+        }
+    }
+    while(size);
+
+    return gcvSTATUS_OK;
+}
 
 /******************************************************************************\
 ********************************* Task Scheduling ******************************
@@ -700,6 +783,8 @@ _ScheduleTasks(
                 do
                 {
                     gcsTASK_HEADER_PTR taskHeader = (gcsTASK_HEADER_PTR) (userTask + 1);
+
+                    gcmkVERIFY_OK(_RemoveRecordFromProcesDB(Command, taskHeader));
 
                     gcmkTRACE_ZONE(
                         gcvLEVEL_VERBOSE, gcvZONE_COMMAND,
@@ -828,7 +913,7 @@ _HardwareToKernel(
     }
 
     offset = Address - nodePhysical;
-    *KernelPointer = (gctPOINTER)((gctUINT32)Node->VidMem.kernelVirtual + offset);
+    *KernelPointer = (gctPOINTER)((gctUINT8_PTR)Node->VidMem.kernelVirtual + offset);
 #else
     /* Determine the header offset within the pool it is allocated in. */
     offset = Address - memory->baseAddress;
@@ -876,7 +961,7 @@ _ConvertUserCommandBufferPointer(
         /* Translate the logical address to the kernel space. */
         gcmkERR_BREAK(_HardwareToKernel(
             Command->os,
-            mappedUserCommandBuffer->node,
+            gcmUINT64_TO_PTR(mappedUserCommandBuffer->node),
             headerAddress,
             (gctPOINTER *) KernelCommandBuffer
             ));
@@ -1050,7 +1135,7 @@ _AllocateCommandBuffer(
 
         /* Initialize the structure. */
         commandBuffer->completion    = gcvVACANT_BUFFER;
-        commandBuffer->node          = node;
+        commandBuffer->node          = gcmPTR_TO_UINT64(node);
         commandBuffer->address       = address + alignedHeaderSize;
         commandBuffer->bufferOffset  = alignedHeaderSize;
         commandBuffer->size          = requestedSize;
@@ -1105,7 +1190,7 @@ _FreeCommandBuffer(
     gceSTATUS status;
 
     /* Free the buffer. */
-    status = _FreeLinear(Kernel, CommandBuffer->node);
+    status = _FreeLinear(Kernel, gcmUINT64_TO_PTR(CommandBuffer->node));
 
     /* Return status. */
     return status;
@@ -1149,7 +1234,6 @@ _EventHandler_BusError(
     return gcvSTATUS_OK;
 }
 
-#if gcdPOWER_MANAGEMENT
 /******************************************************************************\
 ****************************** Power Stall Handler *******************************
 \******************************************************************************/
@@ -1165,7 +1249,6 @@ _EventHandler_PowerStall(
         Kernel->command->powerStallSignal,
         gcvTRUE);
 }
-#endif
 
 /******************************************************************************\
 ******************************** Task Routines *********************************
@@ -1562,7 +1645,7 @@ _TaskUnlockVideoMemory(
         /* Unlock video memory. */
         gcmkERR_BREAK(gckVIDMEM_Unlock(
             Command->kernel->kernel,
-            task->node,
+            gcmUINT64_TO_PTR(task->node),
             gcvSURF_TYPE_UNKNOWN,
             gcvNULL));
 
@@ -1593,7 +1676,7 @@ _TaskFreeVideoMemory(
             = (gcsTASK_FREE_VIDEO_MEMORY_PTR) TaskHeader->task;
 
         /* Free video memory. */
-        gcmkERR_BREAK(gckVIDMEM_Free(task->node));
+        gcmkERR_BREAK(gckVIDMEM_Free(gcmUINT64_TO_PTR(task->node)));
 
         /* Update the reference counter. */
         TaskHeader->container->referenceCount -= 1;
@@ -1880,15 +1963,12 @@ gcmDECLARE_INTERRUPT_HANDLER(COMMAND, 0)
                             );
                     }
                 }
-#if gcdPOWER_MANAGEMENT
                 else
                 {
-
                     status = gckVGHARDWARE_SetPowerManagementState(
                                 Kernel->command->hardware, gcvPOWER_IDLE_BROADCAST
                                 );
                 }
-#endif
 
                 /* Break out of the loop. */
                 break;
@@ -2763,7 +2843,7 @@ gckVGCOMMAND_Construct(
             _EventHandler_BusError
             ));
 
-#if gcdPOWER_MANAGEMENT
+
         command->powerStallInt = 30;
         /* Enable the interrupt. */
         gcmkERR_BREAK(gckVGINTERRUPT_Enable(
@@ -2771,7 +2851,6 @@ gckVGCOMMAND_Construct(
             &command->powerStallInt,
             _EventHandler_PowerStall
             ));
-#endif
 
         /***********************************************************************
         ** Task management initialization.
@@ -3334,7 +3413,6 @@ gckVGCOMMAND_Commit(
             gcvINFINITE
             ));
 
-#if gcdPOWER_MANAGEMENT
         status = gckVGHARDWARE_SetPowerManagementState(
             Command->hardware, gcvPOWER_ON_AUTO);
 
@@ -3362,7 +3440,9 @@ gckVGCOMMAND_Commit(
 
             break;
         }
-#endif
+
+        gcmkERR_BREAK(_FlushMMU(Command));
+
         do
         {
             /* Assign a context ID if not yet assigned. */
@@ -3589,10 +3669,9 @@ gckVGCOMMAND_Commit(
         }
         while (gcvFALSE);
 
-#if gcdPOWER_MANAGEMENT
         gcmkVERIFY_OK(gckOS_ReleaseSemaphore(
             Command->os, Command->powerSemaphore));
-#endif
+
         /* Release the mutex. */
         gcmkCHECK_STATUS(gckOS_ReleaseMutex(
             Command->os,

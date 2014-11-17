@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2004-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -31,6 +31,10 @@
 #include <linux/list.h>
 #include <linux/ipu.h>
 #include <linux/mxc_v4l2.h>
+#include <linux/completion.h>
+#include <linux/dmaengine.h>
+#include <linux/pxp_dma.h>
+#include <mach/dma.h>
 #include <mach/ipu-v3.h>
 
 #include <media/v4l2-dev.h>
@@ -52,7 +56,10 @@ struct mxc_v4l_frame {
 	struct v4l2_buffer buffer;
 	struct list_head queue;
 	int index;
-	int ipu_buf_num;
+	union {
+		int ipu_buf_num;
+		int csi_buf_num;
+	};
 };
 
 /* Only for old version.  Will go away soon. */
@@ -115,7 +122,6 @@ typedef struct _cam_data {
 	spinlock_t dqueue_int_lock;
 	struct mxc_v4l_frame frame[FRAME_NUM];
 	struct mxc_v4l_frame dummy_frame;
-	int skip_frame;
 	wait_queue_head_t enc_queue;
 	int enc_counter;
 	dma_addr_t rot_enc_bufs[2];
@@ -192,8 +198,10 @@ typedef struct _cam_data {
 	int capture_pid;
 	bool low_power;
 	wait_queue_head_t power_queue;
+	unsigned int ipu_id;
 	unsigned int csi;
 	u8 mclk_source;
+	bool mclk_on[2];	/* two mclk sources at most now */
 	int current_input;
 
 	int local_buf_num;
@@ -205,6 +213,14 @@ typedef struct _cam_data {
 	struct v4l2_int_device *self;
 	int sensor_index;
 	void *ipu;
+
+	/* v4l2 buf elements related to PxP DMA */
+	struct completion pxp_tx_cmpl;
+	struct pxp_channel *pxp_chan;
+	struct pxp_config_data pxp_conf;
+	struct dma_async_tx_descriptor *txd;
+	dma_cookie_t cookie;
+	struct scatterlist sg[2];
 } cam_data;
 
 struct sensor_data {
@@ -232,11 +248,5 @@ struct sensor_data {
 	void (*io_init)(void);
 };
 
-#if defined(CONFIG_MXC_IPU_V1) || defined(CONFIG_VIDEO_MXC_EMMA_CAMERA) \
-			       || defined(CONFIG_VIDEO_MXC_CSI_CAMERA_MODULE) \
-			       || defined(CONFIG_VIDEO_MXC_CSI_CAMERA)
-void set_mclk_rate(uint32_t *p_mclk_freq);
-#else
 void set_mclk_rate(uint32_t *p_mclk_freq, uint32_t csi);
-#endif
 #endif				/* __MXC_V4L2_CAPTURE_H__ */

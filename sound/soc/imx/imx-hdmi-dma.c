@@ -119,6 +119,7 @@ void hdmi_dma_copy_24_neon_fast(unsigned int *src, unsigned int *dst,
 			int samples);
 
 hdmi_audio_header_t iec_header;
+EXPORT_SYMBOL(iec_header);
 
 /*
  * Note that the period size for DMA != period size for ALSA because the
@@ -582,7 +583,7 @@ static void hdmi_sdma_isr(void *data)
 	struct imx_hdmi_dma_runtime_data *rtd = data;
 	struct snd_pcm_substream *substream = rtd->tx_substream;
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	unsigned long offset,  count, space_to_end, appl_bytes;
+	unsigned long offset, count, appl_bytes;
 	unsigned long flags;
 
 	spin_lock_irqsave(&rtd->irq_lock, flags);
@@ -596,38 +597,11 @@ static void hdmi_sdma_isr(void *data)
 		 * to hw_buffer and add the frame info. */
 		if (runtime->access == SNDRV_PCM_ACCESS_MMAP_INTERLEAVED) {
 			appl_bytes = frames_to_bytes(runtime,
-						runtime->control->appl_ptr);
-
-			if (rtd->appl_bytes > appl_bytes) {
-				if (appl_bytes > rtd->buffer_bytes)
-					rtd->appl_bytes =
-						appl_bytes - rtd->buffer_bytes;
-				else
-					rtd->appl_bytes = 0;
-			} else {
-				if ((appl_bytes - rtd->appl_bytes) >
-						rtd->buffer_bytes)
-					rtd->appl_bytes =
-						appl_bytes - rtd->buffer_bytes;
-
-			}
-
-			offset = rtd->appl_bytes % rtd->buffer_bytes;
-			space_to_end = rtd->buffer_bytes - offset;
-			count = appl_bytes - rtd->appl_bytes;
-			if (count > rtd->buffer_bytes)
-				count = rtd->buffer_bytes;
-
-			rtd->appl_bytes = appl_bytes;
-
-			if (count <= space_to_end) {
-				hdmi_dma_mmap_copy(substream, offset, count);
-			} else {
-				hdmi_dma_mmap_copy(substream,
-						offset, space_to_end);
-				hdmi_dma_mmap_copy(substream,
-						0, count - space_to_end);
-			}
+						runtime->status->hw_ptr);
+			appl_bytes += 2 * rtd->period_bytes;
+			offset = appl_bytes % rtd->buffer_bytes;
+			count = rtd->period_bytes;
+			hdmi_dma_mmap_copy(substream, offset, count);
 		}
 		snd_pcm_period_elapsed(substream);
 
@@ -644,7 +618,7 @@ static irqreturn_t hdmi_dma_isr(int irq, void *dev_id)
 	struct imx_hdmi_dma_runtime_data *rtd = dev_id;
 	struct snd_pcm_substream *substream = rtd->tx_substream;
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	unsigned long offset,  count, space_to_end, appl_bytes;
+	unsigned long offset, count, appl_bytes;
 	unsigned long flags;
 	unsigned int status;
 
@@ -662,34 +636,11 @@ static irqreturn_t hdmi_dma_isr(int irq, void *dev_id)
 		 * to hw_buffer and add the frame info. */
 		if (runtime->access == SNDRV_PCM_ACCESS_MMAP_INTERLEAVED) {
 			appl_bytes = frames_to_bytes(runtime,
-						runtime->control->appl_ptr);
-			if (rtd->appl_bytes > appl_bytes) {
-				if (appl_bytes > rtd->buffer_bytes)
-					rtd->appl_bytes =
-						appl_bytes - rtd->buffer_bytes;
-				else
-					rtd->appl_bytes = 0;
-			} else {
-				if ((appl_bytes - rtd->appl_bytes) >
-							rtd->buffer_bytes)
-					rtd->appl_bytes =
-						appl_bytes - rtd->buffer_bytes;
-
-			}
-
-			offset = rtd->appl_bytes % rtd->buffer_bytes;
-			space_to_end = rtd->buffer_bytes - offset;
-			count = appl_bytes - rtd->appl_bytes;
-			if (count > rtd->buffer_bytes)
-				count = rtd->buffer_bytes;
-			rtd->appl_bytes = appl_bytes;
-
-			if (count <= space_to_end) {
-				hdmi_dma_mmap_copy(substream, offset, count);
-			} else {
-				hdmi_dma_mmap_copy(substream, offset, space_to_end);
-				hdmi_dma_mmap_copy(substream, 0, count - space_to_end);
-			}
+						runtime->status->hw_ptr);
+			appl_bytes += 2 * rtd->period_bytes;
+			offset = appl_bytes % rtd->buffer_bytes;
+			count = rtd->period_bytes;
+			hdmi_dma_mmap_copy(substream, offset, count);
 		}
 		snd_pcm_period_elapsed(substream);
 
@@ -1110,6 +1061,7 @@ static int hdmi_dma_trigger(struct snd_pcm_substream *substream, int cmd)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct imx_hdmi_dma_runtime_data *rtd = runtime->private_data;
 	unsigned long offset,  count, space_to_end, appl_bytes;
+	unsigned int status;
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
@@ -1120,36 +1072,10 @@ static int hdmi_dma_trigger(struct snd_pcm_substream *substream, int cmd)
 		rtd->frame_idx = 0;
 		if (runtime->access == SNDRV_PCM_ACCESS_MMAP_INTERLEAVED) {
 			appl_bytes = frames_to_bytes(runtime,
-						runtime->control->appl_ptr);
-			/* If resume, the rtd->appl_bytes may stil
-			 * keep the old value but the control->
-			 * appl_ptr is clear. Reset it if this
-			 * misalignment happens*/
-			if (rtd->appl_bytes > appl_bytes) {
-				if (appl_bytes > rtd->buffer_bytes)
-					rtd->appl_bytes =
-						appl_bytes - rtd->buffer_bytes;
-				else
-					rtd->appl_bytes = 0;
-			} else {
-				if ((appl_bytes - rtd->appl_bytes) >
-						rtd->buffer_bytes)
-					rtd->appl_bytes =
-						appl_bytes - rtd->buffer_bytes;
-
-			}
-
-			offset = rtd->appl_bytes % rtd->buffer_bytes;
+						runtime->status->hw_ptr);
+			offset = appl_bytes % rtd->buffer_bytes;
+			count = rtd->buffer_bytes;
 			space_to_end = rtd->buffer_bytes - offset;
-			count = appl_bytes - rtd->appl_bytes;
-
-			if (count > rtd->buffer_bytes) {
-				pr_err("Error Count,ring buffer size[%ld], count[%ld]!\n",
-						rtd->buffer_bytes, count);
-				return -EINVAL;
-			}
-
-			rtd->appl_bytes = appl_bytes;
 
 			if (count <= space_to_end) {
 				hdmi_dma_mmap_copy(substream, offset, count);
@@ -1159,12 +1085,14 @@ static int hdmi_dma_trigger(struct snd_pcm_substream *substream, int cmd)
 				hdmi_dma_mmap_copy(substream,
 						0, count - space_to_end);
 			}
-
 		}
 		dumpregs();
 
 		hdmi_fifo_reset();
 		udelay(1);
+
+		status = hdmi_dma_get_irq_status();
+		hdmi_dma_clear_irq_status(status);
 
 		hdmi_dma_priv->tx_active = true;
 		hdmi_dma_start();

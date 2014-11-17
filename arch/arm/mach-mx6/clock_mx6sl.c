@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2012-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -73,6 +73,7 @@ static struct cpu_op *cpu_op_tbl;
 static int cpu_op_nr;
 static bool pll1_enabled;
 static bool arm_needs_pll2_400;
+static bool audio_pll_bypass;
 
 DEFINE_SPINLOCK(mx6sl_clk_lock);
 #define SPIN_DELAY	1200000 /* in nanoseconds */
@@ -101,9 +102,7 @@ DEFINE_SPINLOCK(mx6sl_clk_lock);
 	u32 gpt_ticks; \
 	u32 gpt_cnt; \
 	u32 reg; \
-	unsigned long flags; \
 	int result = 1; \
-	spin_lock_irqsave(&mx6sl_clk_lock, flags); \
 	gpt_rate = clk_get_rate(&gpt_clk[0]); \
 	gpt_ticks = timeout / (1000000000 / gpt_rate); \
 	reg = __raw_readl(timer_base + V2_TSTAT);\
@@ -133,7 +132,6 @@ DEFINE_SPINLOCK(mx6sl_clk_lock);
 			} \
 		} \
 	} \
-	spin_unlock_irqrestore(&mx6sl_clk_lock, flags); \
 	result; \
 })
 
@@ -432,7 +430,8 @@ static int _clk_pll_enable(struct clk *clk)
 	pllbase = _get_pll_base(clk);
 
 	reg = __raw_readl(pllbase);
-	reg &= ~ANADIG_PLL_POWER_DOWN;
+	if (clk != &pll4_audio_main_clk || !audio_pll_bypass)
+		reg &= ~ANADIG_PLL_POWER_DOWN;
 
 	/* The 480MHz PLLs have the opposite definition for power bit. */
 	if (clk == &pll3_usb_otg_main_clk || clk == &pll7_usb_host_main_clk)
@@ -445,14 +444,20 @@ static int _clk_pll_enable(struct clk *clk)
 		__raw_writel(BM_ANADIG_ANA_MISC2_CONTROL0, apll_base + HW_ANADIG_ANA_MISC2_CLR);
 
 	/* Wait for PLL to lock */
-	if (!WAIT((__raw_readl(pllbase) & ANADIG_PLL_LOCK),
-				SPIN_DELAY))
-		panic("pll enable failed\n");
-
+	if (clk != &pll4_audio_main_clk || !audio_pll_bypass) {
+		if (!WAIT((__raw_readl(pllbase) & ANADIG_PLL_LOCK),
+					SPIN_DELAY))
+			panic("pll enable failed\n");
+	}
 	/* Enable the PLL output now*/
 	reg = __raw_readl(pllbase);
-	reg &= ~ANADIG_PLL_BYPASS;
+
+	/* If audio PLL is set to 24MHz, leave it in bypass mode. */
+	if (clk != &pll4_audio_main_clk || !audio_pll_bypass)
+		reg &= ~ANADIG_PLL_BYPASS;
+
 	reg |= ANADIG_PLL_ENABLE;
+
 	__raw_writel(reg, pllbase);
 
 	return 0;
@@ -877,6 +882,9 @@ static unsigned long _clk_audio_video_get_rate(struct clk *clk)
 
 	pllbase = _get_pll_base(clk);
 
+	if (__raw_readl(pllbase) & ANADIG_PLL_BYPASS)
+		return 24000000;
+
 	test_div_sel = (__raw_readl(pllbase)
 		& ANADIG_PLL_AV_TEST_DIV_SEL_MASK)
 		>> ANADIG_PLL_AV_TEST_DIV_SEL_OFFSET;
@@ -920,6 +928,16 @@ static int _clk_audio_video_set_rate(struct clk *clk, unsigned long rate)
 	u32 test_div_sel = 2;
 	u32 control3 = 0;
 
+	pllbase = _get_pll_base(clk);
+
+	if (clk == &pll4_audio_main_clk && audio_pll_bypass) {
+		reg = __raw_readl(pllbase)
+				& ~ANADIG_PLL_SYS_DIV_SELECT_MASK
+				& ~ANADIG_PLL_AV_TEST_DIV_SEL_MASK;
+		__raw_writel(reg, pllbase);
+		return 0;
+	}
+
 	if (clk == &pll4_audio_main_clk)
 		min_clk_rate = AUDIO_VIDEO_MIN_CLK_FREQ / 4;
 	else
@@ -927,8 +945,6 @@ static int _clk_audio_video_set_rate(struct clk *clk, unsigned long rate)
 
 	if ((rate < min_clk_rate) || (rate > AUDIO_VIDEO_MAX_CLK_FREQ))
 		return -EINVAL;
-
-	pllbase = _get_pll_base(clk);
 
 	pre_div_rate = rate;
 	while (pre_div_rate < AUDIO_VIDEO_MIN_CLK_FREQ) {
@@ -988,6 +1004,9 @@ static unsigned long _clk_audio_video_round_rate(struct clk *clk,
 	u32 test_div_sel = 2;
 	u32 control3 = 0;
 	unsigned long final_rate;
+
+	if (clk == &pll4_audio_main_clk && audio_pll_bypass)
+		return 24000000;
 
 	if (clk == &pll4_audio_main_clk)
 		min_clk_rate = AUDIO_VIDEO_MIN_CLK_FREQ / 4;
@@ -1684,6 +1703,7 @@ static struct clk mmdc_ch1_axi_clk[] = {
 	.secondary = &tzasc2_clk,
 	},
 };
+
 #if defined(CONFIG_SDMA_IRAM) || defined(CONFIG_SND_MXC_SOC_IRAM)
 static struct clk ocram_clk = {
 	__INIT_CLK_DEBUG(ocram_clk)
@@ -1695,6 +1715,7 @@ static struct clk ocram_clk = {
 	.disable = _clk_disable_inwait,
 };
 #endif
+
 static unsigned long _clk_ipg_perclk_get_rate(struct clk *clk)
 {
 	u32 reg, div;
@@ -1945,8 +1966,8 @@ static unsigned long _clk_ipu_round_rate(struct clk *clk,
 }
 
 static struct clk ipu1_clk = {
-	__INIT_CLK_DEBUG(ipu1_clk)
-	.parent = &pll2_pfd2_400M,
+	__INIT_CLK_DEBUG(csi_clk)
+	.parent = &osc_clk,
 	.enable_reg = MXC_CCM_CCGR3,
 	.enable_shift = MXC_CCM_CCGRx_CG0_OFFSET,
 	.enable = _clk_enable,
@@ -2379,14 +2400,23 @@ static int _clk_extern_audio_set_rate(struct clk *clk, unsigned long rate)
 	u32 reg, div, pre, post;
 	u32 parent_rate = clk_get_rate(clk->parent);
 
-	div = parent_rate / rate;
-	if (div == 0)
-		div++;
-	if (((parent_rate / div) != rate) || div > 64)
-		return -EINVAL;
+	if (rate == 24000000 && clk->parent == &pll4_audio_main_clk) {
+		/* If the requested rate is 24MHz,
+		  * set the PLL4 to bypass mode.
+		  */
+		audio_pll_bypass = 1;
+		pre = post = 1;
+	} else {
+		div = parent_rate / rate;
+		if (div == 0)
+			div++;
+		if (((parent_rate / div) != rate) || div > 64)
+			return -EINVAL;
 
-	__calc_pre_post_dividers(1 << 3, div, &pre, &post);
+		audio_pll_bypass = 0;
 
+		__calc_pre_post_dividers(1 << 3, div, &pre, &post);
+	}
 	reg = __raw_readl(MXC_CCM_CS1CDR);
 	reg &= ~(MXC_CCM_CS1CDR_ESAI_CLK_PRED_MASK|
 		 MXC_CCM_CS1CDR_ESAI_CLK_PODF_MASK);
@@ -2430,23 +2460,25 @@ static int _clk_ssi1_set_parent(struct clk *clk, struct clk *parent)
 	return 0;
 }
 
-static struct clk ssi1_clk = {
-	__INIT_CLK_DEBUG(ssi1_clk)
-	.parent = &pll3_pfd2_508M,
-	.enable_reg = MXC_CCM_CCGR5,
-	.enable_shift = MXC_CCM_CCGRx_CG9_OFFSET,
-	.enable = _clk_enable,
-	.disable = _clk_disable,
-	.set_parent = _clk_ssi1_set_parent,
-	.set_rate = _clk_ssi1_set_rate,
-	.round_rate = _clk_ssi_round_rate,
-	.get_rate = _clk_ssi1_get_rate,
-#ifdef CONFIG_SND_MXC_SOC_IRAM
-	 .secondary = &ocram_clk,
-#else
+static struct clk ssi1_clk[] = {
+	{
+	 __INIT_CLK_DEBUG(ssi1_clk)
+	 .parent = &pll3_pfd2_508M,
+	 .enable_reg = MXC_CCM_CCGR5,
+	 .enable_shift = MXC_CCM_CCGRx_CG9_OFFSET,
+	 .enable = _clk_enable,
+	 .disable = _clk_disable,
+	 .set_parent = _clk_ssi1_set_parent,
+	 .set_rate = _clk_ssi1_set_rate,
+	 .round_rate = _clk_ssi_round_rate,
+	 .get_rate = _clk_ssi1_get_rate,
+	 .flags  = AHB_AUDIO_SET_POINT | CPU_FREQ_TRIG_UPDATE,
+#ifndef CONFIG_SND_MXC_SOC_IRAM
 	 .secondary = &mmdc_ch1_axi_clk[0],
+#else
+	 .secondary = &ocram_clk,
 #endif
-	.flags  = AHB_AUDIO_SET_POINT | CPU_FREQ_TRIG_UPDATE,
+	},
 };
 
 static unsigned long _clk_ssi2_get_rate(struct clk *clk)
@@ -2504,23 +2536,25 @@ static int _clk_ssi2_set_parent(struct clk *clk, struct clk *parent)
 	return 0;
 }
 
-static struct clk ssi2_clk = {
-	__INIT_CLK_DEBUG(ssi2_clk)
-	.parent = &pll3_pfd2_508M,
-	.enable_reg = MXC_CCM_CCGR5,
-	.enable_shift = MXC_CCM_CCGRx_CG10_OFFSET,
-	.enable = _clk_enable,
-	.disable = _clk_disable,
-	.set_parent = _clk_ssi2_set_parent,
-	.set_rate = _clk_ssi2_set_rate,
-	.round_rate = _clk_ssi_round_rate,
-	.get_rate = _clk_ssi2_get_rate,
-#ifdef CONFIG_SND_MXC_SOC_IRAM
-	 .secondary = &ocram_clk,
-#else
+static struct clk ssi2_clk[] = {
+	{
+	 __INIT_CLK_DEBUG(ssi2_clk)
+	 .parent = &pll3_pfd2_508M,
+	 .enable_reg = MXC_CCM_CCGR5,
+	 .enable_shift = MXC_CCM_CCGRx_CG10_OFFSET,
+	 .enable = _clk_enable,
+	 .disable = _clk_disable,
+	 .set_parent = _clk_ssi2_set_parent,
+	 .set_rate = _clk_ssi2_set_rate,
+	 .round_rate = _clk_ssi_round_rate,
+	 .get_rate = _clk_ssi2_get_rate,
+	 .flags  = AHB_AUDIO_SET_POINT | CPU_FREQ_TRIG_UPDATE,
+#ifndef CONFIG_SND_MXC_SOC_IRAM
 	 .secondary = &mmdc_ch1_axi_clk[0],
+#else
+	 .secondary = &ocram_clk,
 #endif
-	.flags  = AHB_AUDIO_SET_POINT | CPU_FREQ_TRIG_UPDATE,
+	},
 };
 
 static unsigned long _clk_ssi3_get_rate(struct clk *clk)
@@ -2577,23 +2611,25 @@ static int _clk_ssi3_set_parent(struct clk *clk, struct clk *parent)
 	return 0;
 }
 
-static struct clk ssi3_clk = {
-	__INIT_CLK_DEBUG(ssi3_clk)
-	.parent = &pll3_pfd2_508M,
-	.enable_reg = MXC_CCM_CCGR5,
-	.enable_shift = MXC_CCM_CCGRx_CG11_OFFSET,
-	.enable = _clk_enable,
-	.disable = _clk_disable,
-	.set_parent = _clk_ssi3_set_parent,
-	.set_rate = _clk_ssi3_set_rate,
-	.round_rate = _clk_ssi_round_rate,
-	.get_rate = _clk_ssi3_get_rate,
-#ifdef CONFIG_SND_MXC_SOC_IRAM
-	 .secondary = &ocram_clk,
-#else
+static struct clk ssi3_clk[] = {
+	{
+	 __INIT_CLK_DEBUG(ssi3_clk)
+	 .parent = &pll3_pfd2_508M,
+	 .enable_reg = MXC_CCM_CCGR5,
+	 .enable_shift = MXC_CCM_CCGRx_CG11_OFFSET,
+	 .enable = _clk_enable,
+	 .disable = _clk_disable,
+	 .set_parent = _clk_ssi3_set_parent,
+	 .set_rate = _clk_ssi3_set_rate,
+	 .round_rate = _clk_ssi_round_rate,
+	 .get_rate = _clk_ssi3_get_rate,
+	 .flags  = AHB_AUDIO_SET_POINT | CPU_FREQ_TRIG_UPDATE,
+#ifndef CONFIG_SND_MXC_SOC_IRAM
 	 .secondary = &mmdc_ch1_axi_clk[0],
+#else
+	 .secondary = &ocram_clk,
 #endif
-	.flags  = AHB_AUDIO_SET_POINT | CPU_FREQ_TRIG_UPDATE,
+	},
 };
 
 static unsigned long _clk_epdc_lcdif_pix_round_rate(struct clk *clk,
@@ -3157,6 +3193,17 @@ static struct clk fec_clk[] = {
 	.parent = &mmdc_ch1_axi_clk[0],
 	.secondary = &mx6per1_clk,
 	},
+};
+
+static unsigned long _clk_fec_mdc_get_rate(struct clk *clk)
+{
+	return clk_get_rate(clk->parent);
+}
+
+static struct clk fec_mdc_clk = {
+	__INIT_CLK_DEBUG(fec_mdc_clk)
+	.parent = &ipg_clk,
+	.get_rate = _clk_fec_mdc_get_rate,
 };
 
 static struct clk ecspi_clk[] = {
@@ -3758,11 +3805,11 @@ static int _clk_clko2_set_parent(struct clk *clk, struct clk *parent)
 		sel = 14;
 	else if (parent == &usdhc2_clk)
 		sel = 17;
-	else if (parent == &ssi1_clk)
+	else if (parent == &ssi1_clk[0])
 		sel = 18;
-	else if (parent == &ssi2_clk)
+	else if (parent == &ssi2_clk[0])
 		sel = 19;
-	else if (parent == &ssi3_clk)
+	else if (parent == &ssi3_clk[0])
 		sel = 20;
 	else if (parent == &uart_clk[0])
 		sel = 28;
@@ -3915,9 +3962,9 @@ static struct clk_lookup lookups[] = {
 	_REGISTER_CLOCK("sdhci-esdhc-imx.1", NULL, usdhc2_clk),
 	_REGISTER_CLOCK("sdhci-esdhc-imx.2", NULL, usdhc3_clk),
 	_REGISTER_CLOCK("sdhci-esdhc-imx.3", NULL, usdhc4_clk),
-	_REGISTER_CLOCK("imx-ssi.0", NULL, ssi1_clk),
-	_REGISTER_CLOCK("imx-ssi.1", NULL, ssi2_clk),
-	_REGISTER_CLOCK("imx-ssi.2", NULL, ssi3_clk),
+	_REGISTER_CLOCK("imx-ssi.0", NULL, ssi1_clk[0]),
+	_REGISTER_CLOCK("imx-ssi.1", NULL, ssi2_clk[0]),
+	_REGISTER_CLOCK("imx-ssi.2", NULL, ssi3_clk[0]),
 	_REGISTER_CLOCK(NULL, "pxp_axi", pxp_axi_clk),
 	_REGISTER_CLOCK(NULL, "epdc_axi", epdc_axi_clk),
 	_REGISTER_CLOCK(NULL, "epdc_pix", epdc_pix_clk),
@@ -3938,7 +3985,8 @@ static struct clk_lookup lookups[] = {
 	_REGISTER_CLOCK("mxc_pwm.1", NULL, pwm_clk[1]),
 	_REGISTER_CLOCK("mxc_pwm.2", NULL, pwm_clk[2]),
 	_REGISTER_CLOCK("mxc_pwm.3", NULL, pwm_clk[3]),
-	_REGISTER_CLOCK("fec.0", NULL, fec_clk[0]),
+	_REGISTER_CLOCK(NULL, "fec_clk", fec_clk[0]),
+	_REGISTER_CLOCK(NULL, "fec_mdc_clk", fec_mdc_clk),
 	_REGISTER_CLOCK(NULL, "usboh3_clk", usboh3_clk[0]),
 	_REGISTER_CLOCK(NULL, "usb_phy1_clk", usb_phy1_clk),
 	_REGISTER_CLOCK(NULL, "usb_phy3_clk", usb_phy3_clk),
@@ -4006,11 +4054,14 @@ int __init mx6sl_clocks_init(unsigned long ckil, unsigned long osc,
 	 * should be from OSC24M */
 	clk_set_parent(&ipg_perclk, &osc_clk);
 
-	/* Need to set IPG_PERCLK to 3MHz, so that we can
-	  * satisfy the 2.5:1 AHB:IPG_PERCLK ratio. Since AHB
-	  * can be dropped to as low as 8MHz in low power mode.
+
+	/*IPG_PERCLK sources I2C.
+	  * I2C needs a minimum of 12.8MHz as its source
+	  * to acheive 400KHz speed.
+	  * Hence set ipg_perclk to 24MHz.
 	  */
-	clk_set_rate(&ipg_perclk, 3000000);
+
+	clk_set_rate(&ipg_perclk, 24000000);
 
 	gpt_clk[0].parent = &ipg_perclk;
 	gpt_clk[0].get_rate = NULL;
@@ -4065,9 +4116,9 @@ int __init mx6sl_clocks_init(unsigned long ckil, unsigned long osc,
 		     3 << MXC_CCM_CCGRx_CG11_OFFSET, MXC_CCM_CCGR1);
 	__raw_writel(1 << MXC_CCM_CCGRx_CG12_OFFSET |
 		     1 << MXC_CCM_CCGRx_CG11_OFFSET |
-		     1 << MXC_CCM_CCGRx_CG10_OFFSET |
-		     1 << MXC_CCM_CCGRx_CG9_OFFSET |
-		     1 << MXC_CCM_CCGRx_CG8_OFFSET, MXC_CCM_CCGR2);
+		     3 << MXC_CCM_CCGRx_CG10_OFFSET |
+		     3 << MXC_CCM_CCGRx_CG9_OFFSET |
+		     3 << MXC_CCM_CCGRx_CG8_OFFSET, MXC_CCM_CCGR2);
 	__raw_writel(1 << MXC_CCM_CCGRx_CG14_OFFSET |
 		     3 << MXC_CCM_CCGRx_CG13_OFFSET |
 		     3 << MXC_CCM_CCGRx_CG12_OFFSET |
@@ -4096,6 +4147,8 @@ int __init mx6sl_clocks_init(unsigned long ckil, unsigned long osc,
 	clk_set_parent(&epdc_pix_clk, &pll5_video_main_clk);
 	/* lcdif pix - PLL5 as parent */
 	clk_set_parent(&lcdif_pix_clk, &pll5_video_main_clk);
+
+	clk_set_parent(&ssi2_clk[0], &pll4_audio_main_clk);
 
 	lp_high_freq = 0;
 	lp_med_freq = 0;

@@ -70,7 +70,7 @@ static int prp_enc_setup(cam_data *cam)
 {
 	ipu_channel_params_t enc;
 	int err = 0;
-	dma_addr_t dummy = 0xdeadbeaf;
+	dma_addr_t dummy = cam->dummy_frame.buffer.m.offset;
 #ifdef CONFIG_MXC_MIPI_CSI2
 	void *mipi_csi2_info;
 	int ipu_id;
@@ -99,6 +99,9 @@ static int prp_enc_setup(cam_data *cam)
 	if (cam->v2f.fmt.pix.pixelformat == V4L2_PIX_FMT_YUV420) {
 		enc.csi_prp_enc_mem.out_pixel_fmt = IPU_PIX_FMT_YUV420P;
 		pr_info("YUV420\n");
+	} else if (cam->v2f.fmt.pix.pixelformat == V4L2_PIX_FMT_YVU420) {
+		enc.csi_prp_enc_mem.out_pixel_fmt = IPU_PIX_FMT_YVU420P;
+		pr_info("YVU420\n");
 	} else if (cam->v2f.fmt.pix.pixelformat == V4L2_PIX_FMT_YUV422P) {
 		enc.csi_prp_enc_mem.out_pixel_fmt = IPU_PIX_FMT_YUV422P;
 		pr_info("YUV422P\n");
@@ -169,9 +172,6 @@ static int prp_enc_setup(cam_data *cam)
 		printk(KERN_ERR "ipu_init_channel %d\n", err);
 		return err;
 	}
-
-	ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_ENC,
-				cam->mclk_source, true, true);
 
 	grotation = cam->rotation;
 	if (cam->rotation >= IPU_ROTATE_90_RIGHT) {
@@ -433,11 +433,6 @@ static int prp_enc_disabling_tasks(void *private)
 
 	if (cam->rotation >= IPU_ROTATE_90_RIGHT) {
 		ipu_free_irq(cam->ipu, IPU_IRQ_PRP_ENC_ROT_OUT_EOF, cam);
-	} else {
-		ipu_free_irq(cam->ipu, IPU_IRQ_PRP_ENC_OUT_EOF, cam);
-	}
-
-	if (cam->rotation >= IPU_ROTATE_90_RIGHT) {
 		ipu_unlink_channels(cam->ipu, CSI_PRP_ENC_MEM, MEM_ROT_ENC_MEM);
 	}
 
@@ -476,8 +471,6 @@ static int prp_enc_disabling_tasks(void *private)
 	}
 #endif
 
-	ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_ENC, cam->csi, false, false);
-
 	return err;
 }
 
@@ -503,6 +496,12 @@ static int prp_enc_enable_csi(void *private)
 static int prp_enc_disable_csi(void *private)
 {
 	cam_data *cam = (cam_data *) private;
+
+	/* free csi eof irq firstly.
+	 * when disable csi, wait for idmac eof.
+	 * it requests eof irq again */
+	if (cam->rotation < IPU_ROTATE_90_RIGHT)
+		ipu_free_irq(cam->ipu, IPU_IRQ_PRP_ENC_OUT_EOF, cam);
 
 	return ipu_disable_csi(cam->ipu, cam->csi);
 }

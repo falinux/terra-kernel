@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright 2004-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 /* * The code contained herein is licensed under the GNU General Public
  * License. You may obtain a copy of the GNU General Public License
@@ -55,7 +55,7 @@ static void csi_buf_work_func(struct work_struct *work)
 		task.input.paddr = cam->vf_bufs[1];
 	task.input.width = cam->crop_current.width;
 	task.input.height = cam->crop_current.height;
-	task.input.format = IPU_PIX_FMT_UYVY;
+	task.input.format = IPU_PIX_FMT_NV12;
 
 	if (buffer_num == 0)
 		task.output.paddr = fbi->fix.smem_start +
@@ -124,7 +124,7 @@ static irqreturn_t csi_enc_callback(int irq, void *dev_id)
 	ipu_select_buffer(cam->ipu, CSI_MEM, IPU_OUTPUT_BUFFER, csi_buffer_num);
 	if ((cam->crop_current.width != cam->win.w.width) ||
 		(cam->crop_current.height != cam->win.w.height) ||
-		(vf_out_format != IPU_PIX_FMT_UYVY) ||
+		(vf_out_format != IPU_PIX_FMT_NV12) ||
 		(cam->rotation >= IPU_ROTATE_VERT_FLIP))
 		schedule_work(&cam->csi_work_struct);
 	csi_buffer_num = (csi_buffer_num == 0) ? 1 : 0;
@@ -134,7 +134,6 @@ static irqreturn_t csi_enc_callback(int irq, void *dev_id)
 static int csi_enc_setup(cam_data *cam)
 {
 	ipu_channel_params_t params;
-	u32 pixel_fmt;
 	int err = 0, sensor_protocol = 0;
 #ifdef CONFIG_MXC_MIPI_CSI2
 	void *mipi_csi2_info;
@@ -169,8 +168,6 @@ static int csi_enc_setup(cam_data *cam)
 		printk(KERN_ERR "sensor protocol unsupported\n");
 		return -EINVAL;
 	}
-
-	ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_ENC, cam->csi, true, true);
 
 #ifdef CONFIG_MXC_MIPI_CSI2
 	mipi_csi2_info = mipi_csi2_get_info();
@@ -215,7 +212,8 @@ static int csi_enc_setup(cam_data *cam)
 				  cam->vf_bufs_vaddr[1],
 				  (dma_addr_t) cam->vf_bufs[1]);
 	}
-	csi_mem_bufsize = cam->crop_current.width * cam->crop_current.height * 2;
+	csi_mem_bufsize = cam->crop_current.width *
+			  cam->crop_current.height * 3/2;
 	cam->vf_bufs_size[0] = PAGE_ALIGN(csi_mem_bufsize);
 	cam->vf_bufs_vaddr[0] = (void *)dma_alloc_coherent(0,
 							   cam->vf_bufs_size[0],
@@ -248,13 +246,13 @@ static int csi_enc_setup(cam_data *cam)
 		goto out_1;
 	}
 
-	pixel_fmt = IPU_PIX_FMT_UYVY;
 	if ((cam->crop_current.width == cam->win.w.width) &&
 		(cam->crop_current.height == cam->win.w.height) &&
-		(vf_out_format == IPU_PIX_FMT_UYVY) &&
+		(vf_out_format == IPU_PIX_FMT_NV12) &&
 		(cam->rotation < IPU_ROTATE_VERT_FLIP)) {
 		err = ipu_init_channel_buffer(cam->ipu, CSI_MEM, IPU_OUTPUT_BUFFER,
-					      pixel_fmt, cam->crop_current.width,
+					      IPU_PIX_FMT_NV12,
+					      cam->crop_current.width,
 					      cam->crop_current.height,
 					      cam->crop_current.width, IPU_ROTATE_NONE,
 					      fbi->fix.smem_start + (fbi->fix.line_length * fbvar.yres),
@@ -262,7 +260,8 @@ static int csi_enc_setup(cam_data *cam)
 					      cam->offset.u_offset, cam->offset.u_offset);
 	} else {
 		err = ipu_init_channel_buffer(cam->ipu, CSI_MEM, IPU_OUTPUT_BUFFER,
-					      pixel_fmt, cam->crop_current.width,
+					      IPU_PIX_FMT_NV12,
+					      cam->crop_current.width,
 					      cam->crop_current.height,
 					      cam->crop_current.width, IPU_ROTATE_NONE,
 					      cam->vf_bufs[0], cam->vf_bufs[1], 0,
@@ -349,8 +348,8 @@ out1:
 static int foreground_start(void *private)
 {
 	cam_data *cam = (cam_data *) private;
-	int err = 0, i = 0;
-	short *tmp, color;
+	int err = 0, i = 0, screen_size;
+	char *base;
 
 	if (!cam) {
 		printk(KERN_ERR "private is NULL\n");
@@ -385,13 +384,11 @@ static int foreground_start(void *private)
 
 	if (OVERLAY_FB_SUPPORT_NONSTD) {
 		/* Use DP to do CSC so that we can get better performance */
-		vf_out_format = IPU_PIX_FMT_UYVY;
+		vf_out_format = IPU_PIX_FMT_NV12;
 		fbvar.nonstd = vf_out_format;
-		color = 0x80;
 	} else {
 		vf_out_format = IPU_PIX_FMT_RGB565;
 		fbvar.nonstd = 0;
-		color = 0x0;
 	}
 
 	fbvar.bits_per_pixel = 16;
@@ -399,6 +396,7 @@ static int foreground_start(void *private)
 	fbvar.yres = cam->win.w.height;
 	fbvar.yres_virtual = cam->win.w.height * 2;
 	fbvar.yoffset = 0;
+	fbvar.vmode &= ~FB_VMODE_YWRAP;
 	fbvar.accel_flags = FB_ACCEL_DOUBLE_FLAG;
 	fbvar.activate |= FB_ACTIVATE_FORCE;
 	fb_set_var(fbi, &fbvar);
@@ -407,10 +405,17 @@ static int foreground_start(void *private)
 			cam->win.w.top);
 
 	/* Fill black color for framebuffer */
-	tmp = (short *) fbi->screen_base;
-	for (i = 0; i < (fbi->fix.line_length * fbi->var.yres)/2;
-			i++, tmp++)
-		*tmp = color;
+	base = (char *) fbi->screen_base;
+	screen_size = fbi->var.xres * fbi->var.yres;
+	if (OVERLAY_FB_SUPPORT_NONSTD) {
+		memset(base, 0, screen_size);
+		base += screen_size;
+		for (i = 0; i < screen_size / 2; i++, base++)
+			*base = 0x80;
+	} else {
+		for (i = 0; i < screen_size * 2; i++, base++)
+			*base = 0x00;
+	}
 
 	console_lock();
 	fb_blank(fbi, FB_BLANK_UNBLANK);
@@ -455,8 +460,6 @@ static int foreground_stop(void *private)
 
 	if (cam->overlay_active == false)
 		return 0;
-
-	ipu_free_irq(cam->ipu, IPU_IRQ_CSI0_OUT_EOF, cam);
 
 	err = ipu_disable_channel(cam->ipu, CSI_MEM, true);
 
@@ -510,7 +513,6 @@ static int foreground_stop(void *private)
 
 	flush_work_sync(&cam->csi_work_struct);
 	cancel_work_sync(&cam->csi_work_struct);
-	ipu_csi_enable_mclk_if(cam->ipu, CSI_MCLK_VF, cam->csi, false, false);
 
 	if (cam->vf_bufs_vaddr[0]) {
 		dma_free_coherent(0, cam->vf_bufs_size[0],
@@ -553,6 +555,11 @@ static int foreground_enable_csi(void *private)
 static int foreground_disable_csi(void *private)
 {
 	cam_data *cam = (cam_data *) private;
+
+	/* free csi eof irq firstly.
+	 * when disable csi, wait for idmac eof.
+	 * it requests eof irq again */
+	ipu_free_irq(cam->ipu, IPU_IRQ_CSI0_OUT_EOF, cam);
 
 	return ipu_disable_csi(cam->ipu, cam->csi);
 }

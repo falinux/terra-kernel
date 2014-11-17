@@ -1,7 +1,7 @@
 /*
  * Freescale GPMI NAND Flash Driver
  *
- * Copyright (C) 2008-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2008-2013 Freescale Semiconductor, Inc.
  * Copyright (C) 2008 Embedded Alley Solutions, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -44,7 +44,7 @@ struct timing_threshod timing_default_threshold = {
 	.max_dll_delay_in_ns         = 16,
 };
 
-static struct clk *mxs_dma_clk;
+struct clk *mxs_dma_clk;
 
 static void setup_ddr_timing_onfi(struct gpmi_nand_data *this)
 {
@@ -1160,7 +1160,7 @@ void gpmi_begin(struct gpmi_nand_data *this)
 	unsigned int   clock_period_in_ns;
 	uint32_t       reg;
 	unsigned int   dll_wait_time_in_us;
-	struct gpmi_nfc_hardware_timing  hw;
+	struct gpmi_nfc_hardware_timing  hw = {};
 	int ret;
 
 	/* Enable the clock. */

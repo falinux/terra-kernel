@@ -3,7 +3,7 @@
  *
  *  Copyright (C) 2001, 2002 Andy Grover <andrew.grover@intel.com>
  *  Copyright (C) 2001, 2002 Paul Diefenbaugh <paul.s.diefenbaugh@intel.com>
- *  Copyright (C) 2011-2012 Freescale Semiconductor, Inc.
+ *  Copyright (C) 2011-2013 Freescale Semiconductor, Inc.
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -123,19 +123,22 @@
 		ANATOP_TRIPS_HOT | ANATOP_TRIPS_ACTIVE)
 
 #define _COMPONENT		ANATOP_THERMAL_COMPONENT
-#define KELVIN_OFFSET			273
+#define MKELVIN_OFFSET			273000
 #define POLLING_FREQ			2000 /* 2s */
-#define TEMP_CRITICAL			373 /* 100 C*/
-#define TEMP_HOT				363 /* 90 C*/
-#define TEMP_ACTIVE				353 /* 80 C*/
+#define TEMP_CRITICAL			373000 /* 100000 mC*/
+#define TEMP_HOT				363000 /* 90000 mC*/
+#define TEMP_ACTIVE				353000 /* 80000 mC*/
 #define MEASURE_FREQ			3276  /* 3276 RTC clocks delay, 100ms */
 #define KELVIN_TO_CEL(t, off) (((t) - (off)))
 #define CEL_TO_KELVIN(t, off) (((t) + (off)))
 #define DEFAULT_RATIO			145
 #define DEFAULT_N40C			1563
-#define REG_VALUE_TO_CEL(ratio, raw) ((raw_n40c - raw) * 100 / ratio - 40)
+#define REG_VALUE_TO_MCEL(ratio, raw) (((raw_n40c - raw) * 100 / ratio - 40) * 1000)
 #define ANATOP_DEBUG			false
 #define THERMAL_FUSE_NAME		"/sys/fsl_otp/HW_OCOTP_ANA1"
+
+#define	FACTOR1		15976
+#define	FACTOR2		4297157
 
 /* variables */
 unsigned long anatop_base;
@@ -147,13 +150,13 @@ static bool suspend_flag;
 static unsigned int thermal_irq;
 bool cooling_cpuhotplug;
 bool cooling_device_disable;
+static bool calibration_valid;
 unsigned long temperature_cooling;
 static const struct anatop_device_id thermal_device_ids[] = {
 	{ANATOP_THERMAL_HID},
 	{""},
 };
-int thermal_hot;
-EXPORT_SYMBOL(thermal_hot);
+atomic_t thermal_on = ATOMIC_INIT(1);
 
 enum {
 	DEBUG_USER_STATE = 1U << 0,
@@ -273,12 +276,13 @@ static int anatop_thermal_get_temp(struct thermal_zone_device *thermal,
 	struct anatop_thermal *tz = thermal->devdata;
 	unsigned int tmp;
 	unsigned int reg;
+	unsigned int val;
 
 	if (!tz)
 		return -EINVAL;
 
 	if (!ratio || suspend_flag) {
-		*temp = KELVIN_TO_CEL(TEMP_ACTIVE, KELVIN_OFFSET);
+		*temp = KELVIN_TO_CEL(TEMP_ACTIVE, MKELVIN_OFFSET);
 		return 0;
 	}
 
@@ -307,11 +311,16 @@ static int anatop_thermal_get_temp(struct thermal_zone_device *thermal,
 		anatop_base + HW_ANADIG_TEMPSENSE0_SET);
 
 	tmp = 0;
+	val = jiffies;
 	/* read temperature values */
 	while ((__raw_readl(anatop_base + HW_ANADIG_TEMPSENSE0)
-		& BM_ANADIG_TEMPSENSE0_FINISHED) == 0)
+		& BM_ANADIG_TEMPSENSE0_FINISHED) == 0) {
+		if (time_after(jiffies, (unsigned long)(val + HZ / 2))) {
+			pr_info("Thermal sensor timeout, retry!\n");
+			return 0;
+		}
 		msleep(10);
-
+	}
 	reg = __raw_readl(anatop_base + HW_ANADIG_TEMPSENSE0);
 	tmp = (reg & BM_ANADIG_TEMPSENSE0_TEMP_VALUE)
 		>> BP_ANADIG_TEMPSENSE0_TEMP_VALUE;
@@ -323,17 +332,22 @@ static int anatop_thermal_get_temp(struct thermal_zone_device *thermal,
 	/* only the temp between -40C and 125C is valid, this
 	is for save */
 	if (tmp <= raw_n40c && tmp >= raw_125c)
-		tz->temperature = REG_VALUE_TO_CEL(ratio, tmp);
+		tz->temperature = REG_VALUE_TO_MCEL(ratio, tmp);
 	else {
 		printk(KERN_WARNING "Invalid temperature, force it to 25C\n");
-		tz->temperature = 25;
+		tz->temperature = 25000;
 	}
 
 	if (debug_mask & DEBUG_VERBOSE)
 		pr_info("Cooling device Temperature is %lu C\n", tz->temperature);
 
-	*temp = (cooling_device_disable && tz->temperature >= KELVIN_TO_CEL(TEMP_CRITICAL, KELVIN_OFFSET)) ?
-			KELVIN_TO_CEL(TEMP_CRITICAL - 1, KELVIN_OFFSET) : tz->temperature;
+	*temp = (cooling_device_disable && tz->temperature >= KELVIN_TO_CEL(TEMP_CRITICAL, MKELVIN_OFFSET)) ?
+			KELVIN_TO_CEL(TEMP_CRITICAL - 1, MKELVIN_OFFSET) : tz->temperature;
+
+	/* Set alarm threshold if necessary */
+	if ((__raw_readl(anatop_base + HW_ANADIG_TEMPSENSE0) &
+		BM_ANADIG_TEMPSENSE0_ALARM_VALUE) == 0)
+		anatop_update_alarm(raw_critical);
 
 	return 0;
 }
@@ -482,7 +496,7 @@ static int anatop_thermal_set_trip_temp(struct thermal_zone_device *thermal,
 		if (tz->trips.critical.flags.valid) {
 			tz->trips.critical.temperature = CEL_TO_KELVIN(
 				*temp, tz->kelvin_offset);
-			raw_critical = raw_25c - ratio * (*temp - 25) / 100;
+			raw_critical = raw_25c - ratio * (*temp - 25000) / 100000;
 			anatop_update_alarm(raw_critical);
 		}
 		break;
@@ -568,6 +582,27 @@ static int anatop_thermal_get_crit_temp(struct thermal_zone_device *thermal,
 		return -EINVAL;
 }
 
+static BLOCKING_NOTIFIER_HEAD(thermal_chain_head);
+
+int register_thermal_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&thermal_chain_head, nb);
+}
+EXPORT_SYMBOL_GPL(register_thermal_notifier);
+
+int unregister_thermal_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&thermal_chain_head, nb);
+}
+EXPORT_SYMBOL_GPL(unregister_thermal_notifier);
+
+int thermal_notifier_call_chain(unsigned long val)
+{
+	return (blocking_notifier_call_chain(&thermal_chain_head, val, NULL)
+		== NOTIFY_BAD) ? -EINVAL : 0;
+}
+EXPORT_SYMBOL_GPL(thermal_notifier_call_chain);
+
 static int anatop_thermal_notify(struct thermal_zone_device *thermal, int trip,
 			   enum thermal_trip_type trip_type)
 {
@@ -585,7 +620,8 @@ static int anatop_thermal_notify(struct thermal_zone_device *thermal, int trip,
 		printk(KERN_WARNING "thermal_notify: trip_critical reached!\n");
 		arch_reset(mode, cmd);
 	} else if (trip_type == THERMAL_TRIP_HOT) {
-		thermal_hot = 1;
+		if (atomic_read(&thermal_on))
+			thermal_notifier_call_chain(1);
 		printk(KERN_DEBUG "thermal_notify: trip_hot reached!\n");
 		type = ANATOP_THERMAL_NOTIFY_HOT;
 		/* if temperature increase, continue to detach secondary CPUs*/
@@ -600,7 +636,8 @@ static int anatop_thermal_notify(struct thermal_zone_device *thermal, int trip,
 			printk(KERN_INFO "No secondary CPUs detached!\n");
 		full_run = false;
 	} else {
-		thermal_hot = 0;
+		if (atomic_read(&thermal_on))
+			thermal_notifier_call_chain(0);
 		if (!full_run) {
 			temperature_cooling = 0;
 			if (cooling_cpuhotplug)
@@ -785,7 +822,7 @@ static int anatop_thermal_add(struct anatop_device *device)
 	if (result)
 		goto free_memory;
 
-	tz->kelvin_offset = KELVIN_OFFSET;
+	tz->kelvin_offset = MKELVIN_OFFSET;
 
 	result = anatop_thermal_register_thermal_zone(tz);
 	if (result)
@@ -824,12 +861,22 @@ static int __init anatop_thermal_cooling_device_disable(char *str)
 }
 __setup("no_cooling_device", anatop_thermal_cooling_device_disable);
 
+static int __init anatop_thermal_use_calibration(char *str)
+{
+	calibration_valid = true;
+	pr_info("%s: use calibration data for thermal sensor!\n", __func__);
+
+	return 1;
+}
+__setup("use_calibration", anatop_thermal_use_calibration);
+
 static int anatop_thermal_counting_ratio(unsigned int fuse_data)
 {
 	int ret = -EINVAL;
 
 	pr_info("Thermal calibration data is 0x%x\n", fuse_data);
-	if (fuse_data == 0 || fuse_data == 0xffffffff || (fuse_data & 0xff) == 0) {
+	if (fuse_data == 0 || fuse_data == 0xffffffff ||
+		(fuse_data & 0xfff00000) == 0) {
 		pr_info("%s: invalid calibration data, disable cooling!!!\n", __func__);
 		cooling_device_disable = true;
 		ratio = DEFAULT_RATIO;
@@ -846,13 +893,24 @@ static int anatop_thermal_counting_ratio(unsigned int fuse_data)
 	raw_hot = (fuse_data & 0xfff00) >> 8;
 	hot_temp = fuse_data & 0xff;
 
-	ratio = ((raw_25c - raw_hot) * 100) / (hot_temp - 25);
+	if (!calibration_valid)
+		/*
+		 * The universal equation for thermal sensor
+		 * is slope = 0.4297157 - (0.0015976 * 25C fuse),
+		 * here we convert them to integer to make them
+		 * easy for counting, FACTOR1 is 15976,
+		 * FACTOR2 is 4297157. Our ratio = -100 * slope.
+		 */
+		ratio = ((FACTOR1 * raw_25c - FACTOR2) + 50000) / 100000;
+	else
+		ratio = ((raw_25c - raw_hot) * 100) / (hot_temp - 25);
+
+	pr_info("Thermal sensor with ratio = %d\n", ratio);
 	raw_n40c = raw_25c + (13 * ratio) / 20;
 	raw_125c = raw_25c - ratio;
 	/* Init default critical temp to set alarm */
-	raw_critical = raw_25c - ratio * (KELVIN_TO_CEL(TEMP_CRITICAL, KELVIN_OFFSET) - 25) / 100;
+	raw_critical = raw_25c - ratio * (KELVIN_TO_CEL(TEMP_CRITICAL, MKELVIN_OFFSET) - 25000) / 100000;
 	clk_enable(pll3_clk);
-	anatop_update_alarm(raw_critical);
 
 	return ret;
 }
@@ -870,6 +928,35 @@ static irqreturn_t anatop_thermal_alarm_handler(int irq, void *dev_id)
 
 	return IRQ_HANDLED;
 }
+
+static ssize_t anatop_thermal_flag_show(struct device *dev,
+		struct device_attribute *attr, char *buf) {
+	return sprintf(buf, "read thermal_hot_flag:%d\n",
+			atomic_read(&thermal_on));
+}
+
+static ssize_t anatop_thermal_flag_store(struct device *dev,
+		struct device_attribute *attr, const char *buf,
+		size_t count)
+{
+	int ret;
+	unsigned long data;
+	ret = strict_strtoul(buf, 10, &data);
+	if (data == 0)
+		atomic_set(&thermal_on, 0);
+	else
+		atomic_set(&thermal_on, 1);
+	return count;
+}
+
+static struct device_attribute anatop_thermal_flag_dev_attr = {
+	.attr = {
+		.name = "thermal_hot_flag",
+		.mode = S_IRUSR | S_IWUSR,
+	},
+	.show = anatop_thermal_flag_show,
+	.store = anatop_thermal_flag_store,
+};
 
 static int anatop_thermal_probe(struct platform_device *pdev)
 {
@@ -935,6 +1022,9 @@ static int anatop_thermal_probe(struct platform_device *pdev)
 
 	anatop_thermal_add(device);
 	anatop_thermal_cpufreq_init();
+	retval = device_create_file(&pdev->dev, &anatop_thermal_flag_dev_attr);
+	if (retval)
+		dev_err(&pdev->dev, "create device file failed!\n");
 	pr_info("%s: default cooling device is cpufreq!\n", __func__);
 
 	goto success;

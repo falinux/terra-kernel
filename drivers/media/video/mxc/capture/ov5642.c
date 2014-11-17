@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2012-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  */
 
 /*
@@ -63,6 +63,11 @@ enum ov5642_mode {
 enum ov5642_frame_rate {
 	ov5642_15_fps,
 	ov5642_30_fps
+};
+
+static int ov5642_framerates[] = {
+	[ov5642_15_fps] = 15,
+	[ov5642_30_fps] = 30,
 };
 
 struct reg_value {
@@ -630,7 +635,7 @@ static struct reg_value ov5642_setting_15fps_QSXGA_2592_1944[] = {
 	{0x3503, 0x07, 0, 0}, {0x3000, 0x00, 0, 0}, {0x3001, 0x00, 0, 0},
 	{0x3002, 0x00, 0, 0}, {0x3003, 0x00, 0, 0}, {0x3004, 0xff, 0, 0},
 	{0x3005, 0xff, 0, 0}, {0x3006, 0xff, 0, 0}, {0x3007, 0x3f, 0, 0},
-	{0x3011, 0x08, 0, 0}, {0x3010, 0x20, 0, 0}, {0x3818, 0xc0, 0, 0},
+	{0x3011, 0x08, 0, 0}, {0x3010, 0x10, 0, 0}, {0x3818, 0xc0, 0, 0},
 	{0x3621, 0x09, 0, 0}, {0x350c, 0x07, 0, 0}, {0x350d, 0xd0, 0, 0},
 	{0x3602, 0xe4, 0, 0}, {0x3612, 0xac, 0, 0}, {0x3613, 0x44, 0, 0},
 	{0x3622, 0x60, 0, 0}, {0x3623, 0x22, 0, 0}, {0x3604, 0x48, 0, 0},
@@ -650,6 +655,7 @@ static struct reg_value ov5642_setting_15fps_QSXGA_2592_1944[] = {
 	{0x501f, 0x00, 0, 0}, {0x3002, 0x1c, 0, 0}, {0x3819, 0x80, 0, 0},
 	{0x5002, 0xe0, 0, 0}, {0x530a, 0x01, 0, 0}, {0x530d, 0x10, 0, 0},
 	{0x530c, 0x04, 0, 0}, {0x5312, 0x20, 0, 0}, {0x5282, 0x01, 0, 0},
+	{0x3010, 0x10, 0, 0}, {0x3012, 0x00, 0, 0},
 };
 
 
@@ -682,6 +688,7 @@ static struct reg_value ov5642_setting_QSXGA_2_VGA[] = {
 	{0x3002, 0x5c, 0, 0}, {0x3819, 0x80, 0, 0}, {0x5002, 0xe0, 0, 0},
 	{0x530a, 0x01, 0, 0}, {0x530d, 0x0c, 0, 0}, {0x530c, 0x00, 0, 0},
 	{0x5312, 0x40, 0, 0}, {0x5282, 0x00, 0, 0},
+	{0x3012, 0x02, 0, 0}, {0x3010, 0x00, 0, 0},
 };
 
 static struct reg_value ov5642_setting_30fps_VGA_640_480[] = {
@@ -859,7 +866,7 @@ static struct reg_value ov5642_setting_15fps_VGA_640_480[] = {
 	{0x3001, 0x00, 0, 0}, {0x3002, 0x5c, 0, 0}, {0x3003, 0x00, 0, 0},
 	{0x3004, 0xff, 0, 0}, {0x3005, 0xff, 0, 0}, {0x3006, 0x43, 0, 0},
 	{0x3007, 0x37, 0, 0}, {0x3011, 0x09, 0, 0}, {0x3012, 0x02, 0, 0},
-	{0x3010, 0x10, 0, 0}, {0x460c, 0x20, 0, 0}, {0x3815, 0x04, 0, 0},
+	{0x3010, 0x00, 0, 0}, {0x460c, 0x20, 0, 0}, {0x3815, 0x04, 0, 0},
 	{0x370c, 0xa0, 0, 0}, {0x3602, 0xfc, 0, 0}, {0x3612, 0xff, 0, 0},
 	{0x3634, 0xc0, 0, 0}, {0x3613, 0x00, 0, 0}, {0x3605, 0x7c, 0, 0},
 	{0x3621, 0x09, 0, 0}, {0x3622, 0x60, 0, 0}, {0x3604, 0x40, 0, 0},
@@ -877,8 +884,8 @@ static struct reg_value ov5642_setting_15fps_VGA_640_480[] = {
 	{0x3501, 0x73, 0, 0}, {0x3502, 0x80, 0, 0}, {0x350b, 0x00, 0, 0},
 	{0x3503, 0x07, 0, 0}, {0x3824, 0x11, 0, 0}, {0x3825, 0xb0, 0, 0},
 	{0x3501, 0x1e, 0, 0}, {0x3502, 0x80, 0, 0}, {0x350b, 0x7f, 0, 0},
-	{0x380c, 0x07, 0, 0}, {0x380d, 0x2a, 0, 0}, {0x380e, 0x03, 0, 0},
-	{0x380f, 0xe8, 0, 0}, {0x3a0d, 0x04, 0, 0}, {0x3a0e, 0x03, 0, 0},
+	{0x380c, 0x07, 0, 0}, {0x380d, 0x2a, 0, 0}, {0x380e, 0x07, 0, 0},
+	{0x380f, 0xd0, 0, 0}, {0x3a0d, 0x04, 0, 0}, {0x3a0e, 0x03, 0, 0},
 	{0x3818, 0xc1, 0, 0}, {0x3705, 0xdb, 0, 0}, {0x370a, 0x81, 0, 0},
 	{0x3801, 0x80, 0, 0}, {0x3621, 0xc7, 0, 0}, {0x3801, 0x50, 0, 0},
 	{0x3803, 0x08, 0, 0}, {0x3827, 0x08, 0, 0}, {0x3810, 0x80, 0, 0},
@@ -1200,7 +1207,7 @@ static struct reg_value ov5642_setting_15fps_XGA_1024_768[] = {
 	{0x3001, 0x00, 0, 0}, {0x3002, 0x5c, 0, 0}, {0x3003, 0x00, 0, 0},
 	{0x3004, 0xff, 0, 0}, {0x3005, 0xff, 0, 0}, {0x3006, 0x43, 0, 0},
 	{0x3007, 0x37, 0, 0}, {0x3011, 0x09, 0, 0}, {0x3012, 0x02, 0, 0},
-	{0x3010, 0x10, 0, 0}, {0x460c, 0x20, 0, 0}, {0x3815, 0x04, 0, 0},
+	{0x3010, 0x00, 0, 0}, {0x460c, 0x20, 0, 0}, {0x3815, 0x04, 0, 0},
 	{0x370c, 0xa0, 0, 0}, {0x3602, 0xfc, 0, 0}, {0x3612, 0xff, 0, 0},
 	{0x3634, 0xc0, 0, 0}, {0x3613, 0x00, 0, 0}, {0x3605, 0x7c, 0, 0},
 	{0x3621, 0x09, 0, 0}, {0x3622, 0x60, 0, 0}, {0x3604, 0x40, 0, 0},
@@ -1218,8 +1225,8 @@ static struct reg_value ov5642_setting_15fps_XGA_1024_768[] = {
 	{0x3501, 0x73, 0, 0}, {0x3502, 0x80, 0, 0}, {0x350b, 0x00, 0, 0},
 	{0x3503, 0x07, 0, 0}, {0x3824, 0x11, 0, 0}, {0x3825, 0xb0, 0, 0},
 	{0x3501, 0x1e, 0, 0}, {0x3502, 0x80, 0, 0}, {0x350b, 0x7f, 0, 0},
-	{0x380c, 0x07, 0, 0}, {0x380d, 0x2a, 0, 0}, {0x380e, 0x03, 0, 0},
-	{0x380f, 0xe8, 0, 0}, {0x3a0d, 0x04, 0, 0}, {0x3a0e, 0x03, 0, 0},
+	{0x380c, 0x07, 0, 0}, {0x380d, 0x2a, 0, 0}, {0x380e, 0x07, 0, 0},
+	{0x380f, 0xd0, 0, 0}, {0x3a0d, 0x04, 0, 0}, {0x3a0e, 0x03, 0, 0},
 	{0x3818, 0xc1, 0, 0}, {0x3705, 0xdb, 0, 0}, {0x370a, 0x81, 0, 0},
 	{0x3801, 0x80, 0, 0}, {0x3621, 0xc7, 0, 0}, {0x3801, 0x50, 0, 0},
 	{0x3803, 0x08, 0, 0}, {0x3827, 0x08, 0, 0}, {0x3810, 0x80, 0, 0},
@@ -1362,7 +1369,7 @@ static struct reg_value ov5642_setting_15fps_XGA_1024_768[] = {
 	{0x5087, 0x00, 0, 0}, {0x5088, 0x00, 0, 0}, {0x5089, 0x00, 0, 0},
 	{0x302b, 0x00, 0, 0}, {0x3621, 0x87, 0, 0}, {0x3a00, 0x78, 0, 0},
 	{0x3808, 0x04, 0, 0}, {0x3809, 0x00, 0, 0}, {0x380a, 0x03, 0, 0},
-	{0x380b, 0x00, 0, 0}, {0x3815, 0x02, 0, 0},
+	{0x380b, 0x00, 0, 0}, {0x3815, 0x02, 0, 0}, {0x302c, 0x60, 0x60, 0},
 };
 
 static struct reg_value ov5642_setting_30fps_QVGA_320_240[] = {
@@ -2992,6 +2999,7 @@ static s32 ov5642_write_reg(u16 reg, u8 val);
 
 static const struct i2c_device_id ov5642_id[] = {
 	{"ov5642", 0},
+	{"ov564x", 0},
 	{},
 };
 
@@ -3524,6 +3532,9 @@ static int ioctl_s_parm(struct v4l2_int_device *s, struct v4l2_streamparm *a)
 		ret = ov5642_change_mode(new_frame_rate, old_frame_rate,
 				a->parm.capture.capturemode,
 				sensor->streamcap.capturemode);
+		if (ret < 0)
+			return ret;
+
 		sensor->streamcap.timeperframe = *timeperframe;
 		sensor->streamcap.capturemode =
 				(u32)a->parm.capture.capturemode;
@@ -3734,6 +3745,50 @@ static int ioctl_enum_framesizes(struct v4l2_int_device *s,
 }
 
 /*!
+ * ioctl_enum_frameintervals - V4L2 sensor interface handler for
+ *			       VIDIOC_ENUM_FRAMEINTERVALS ioctl
+ * @s: pointer to standard V4L2 device structure
+ * @fival: standard V4L2 VIDIOC_ENUM_FRAMEINTERVALS ioctl structure
+ *
+ * Return 0 if successful, otherwise -EINVAL.
+ */
+static int ioctl_enum_frameintervals(struct v4l2_int_device *s,
+					 struct v4l2_frmivalenum *fival)
+{
+	int i, j, count;
+
+	if (fival->index < 0 || fival->index > ov5642_mode_MAX)
+		return -EINVAL;
+
+	if (fival->pixel_format == 0 || fival->width == 0 || fival->height == 0) {
+		pr_warning("Please assign pixelformat, width and height.\n");
+		return -EINVAL;
+	}
+
+	fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
+	fival->discrete.numerator = 1;
+
+	count = 0;
+	for (i = 0; i < ARRAY_SIZE(ov5642_mode_info_data); i++) {
+		for (j = 0; j < (ov5642_mode_MAX + 1); j++) {
+			if (fival->pixel_format == ov5642_data.pix.pixelformat
+			 && fival->width == ov5642_mode_info_data[i][j].width
+			 && fival->height == ov5642_mode_info_data[i][j].height
+			 && ov5642_mode_info_data[i][j].init_data_ptr != NULL) {
+				count++;
+			}
+			if (fival->index == (count - 1)) {
+				fival->discrete.denominator =
+						ov5642_framerates[i];
+				return 0;
+			}
+		}
+	}
+
+	return -EINVAL;
+}
+
+/*!
  * ioctl_g_chip_ident - V4L2 sensor interface handler for
  *			VIDIOC_DBG_G_CHIP_IDENT ioctl
  * @s: pointer to standard V4L2 device structure
@@ -3770,7 +3825,7 @@ static int ioctl_init(struct v4l2_int_device *s)
 static int ioctl_enum_fmt_cap(struct v4l2_int_device *s,
 			      struct v4l2_fmtdesc *fmt)
 {
-	if (fmt->index > ov5642_mode_MAX)
+	if (fmt->index > 0)	/* only 1 pixelformat support so far */
 		return -EINVAL;
 
 	fmt->pixelformat = ov5642_data.pix.pixelformat;
@@ -3889,6 +3944,8 @@ static struct v4l2_int_ioctl_desc ov5642_ioctl_desc[] = {
 	{vidioc_int_s_ctrl_num, (v4l2_int_ioctl_func *)ioctl_s_ctrl},
 	{vidioc_int_enum_framesizes_num,
 				(v4l2_int_ioctl_func *)ioctl_enum_framesizes},
+	{vidioc_int_enum_frameintervals_num,
+				(v4l2_int_ioctl_func *)ioctl_enum_frameintervals},
 	{vidioc_int_g_chip_ident_num,
 				(v4l2_int_ioctl_func *)ioctl_g_chip_ident},
 };
@@ -4004,13 +4061,13 @@ static int ov5642_probe(struct i2c_client *client,
 
 	retval = ov5642_read_reg(OV5642_CHIP_ID_HIGH_BYTE, &chip_id_high);
 	if (retval < 0 || chip_id_high != 0x56) {
-		pr_err("%s:cannot find camera\n", __func__);
+		pr_warning("camera ov5642 is not found\n");
 		retval = -ENODEV;
 		goto err4;
 	}
 	retval = ov5642_read_reg(OV5642_CHIP_ID_LOW_BYTE, &chip_id_low);
 	if (retval < 0 || chip_id_low != 0x42) {
-		pr_err("%s:cannot find camera\n", __func__);
+		pr_warning("camera ov5642 is not found\n");
 		retval = -ENODEV;
 		goto err4;
 	}
@@ -4023,6 +4080,7 @@ static int ov5642_probe(struct i2c_client *client,
 	ov5642_int_device.priv = &ov5642_data;
 	retval = v4l2_int_device_register(&ov5642_int_device);
 
+	pr_info("camera ov5642 is found\n");
 	return retval;
 
 err4:

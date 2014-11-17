@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2012-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -172,6 +172,9 @@ static iomux_v3_cfg_t mx6q_sabreauto_pads[] = {
 	/* DISP0 RESET */
 	MX6Q_PAD_EIM_WAIT__GPIO_5_0,
 
+	/* eCompass int */
+	MX6Q_PAD_EIM_EB1__GPIO_2_29,
+
 	/*  SPDIF */
 	MX6Q_PAD_KEY_COL3__SPDIF_IN1,
 
@@ -188,9 +191,7 @@ static iomux_v3_cfg_t mx6q_sabreauto_pads[] = {
 	MX6Q_PAD_GPIO_8__UART2_RXD,
 	MX6Q_PAD_SD4_DAT6__UART2_CTS,
 	MX6Q_PAD_SD4_DAT5__UART2_RTS,
-	/* UART 3 */
-	MX6Q_PAD_SD4_CLK__UART3_TXD,
-	MX6Q_PAD_SD4_CMD__UART3_RXD,
+
 	/*USBs OC pin */
 	MX6Q_PAD_EIM_WAIT__GPIO_5_0,  /*HOST1_OC*/
 	MX6Q_PAD_SD4_DAT0__GPIO_2_8,  /*OTG_OC*/
@@ -206,16 +207,7 @@ static iomux_v3_cfg_t mx6q_sabreauto_pads[] = {
 
 	/* HDMI */
 	MX6Q_PAD_EIM_A25__HDMI_TX_CEC_LINE,
-
-	/* camera reset */
-	MX6Q_PAD_GPIO_19__GPIO_4_5,
-	MX6Q_PAD_EIM_D24__GPIO_3_24,
-
-	/* MLB150 */
-	MX6Q_PAD_ENET_TXD1__MLB_MLBCLK,
-	MX6Q_PAD_GPIO_6__MLB_MLBSIG,
-	MX6Q_PAD_GPIO_2__MLB_MLBDAT,
-};
+ };
 
 static iomux_v3_cfg_t mx6q_sabreauto_can0_pads[] = {
 	/* CAN1 */
@@ -258,8 +250,6 @@ static iomux_v3_cfg_t mx6q_gpmi_nand[] __initdata = {
 	MX6Q_PAD_NANDF_ALE__RAWNAND_ALE,
 	MX6Q_PAD_NANDF_CS0__RAWNAND_CE0N,
 	MX6Q_PAD_NANDF_CS1__RAWNAND_CE1N,
-	MX6Q_PAD_NANDF_CS2__RAWNAND_CE2N,
-	MX6Q_PAD_NANDF_CS3__RAWNAND_CE3N,
 	MX6Q_PAD_NANDF_RB0__RAWNAND_READY0,
 	MX6Q_PAD_SD4_DAT0__RAWNAND_DQS,
 	MX6Q_PAD_NANDF_D0__RAWNAND_D0,
@@ -300,6 +290,15 @@ static iomux_v3_cfg_t mx6q_spinor_pads[] __initdata = {
 	MX6Q_PAD_EIM_D19__ECSPI1_SS1,
 
 	MX6Q_PAD_EIM_D19__GPIO_3_19,
+};
+
+/*Bluetooth is conflicted with GMPI and NOR chips*/
+static iomux_v3_cfg_t mx6q_bluetooth_pads[] __initdata = {
+	/* UART 3 */
+	MX6Q_PAD_SD4_CLK__UART3_RXD,
+	MX6Q_PAD_SD4_CMD__UART3_TXD,
+	MX6Q_PAD_EIM_D30__UART3_CTS,
+	MX6Q_PAD_EIM_EB3__UART3_RTS,
 };
 
 static iomux_v3_cfg_t mx6q_weimnor_pads[] __initdata = {

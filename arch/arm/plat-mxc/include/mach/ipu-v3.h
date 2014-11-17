@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2010 Sascha Hauer <s.hauer@pengutronix.de>
- * Copyright (C) 2011-2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2011-2013 Freescale Semiconductor, Inc.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -419,10 +419,10 @@ typedef struct {
  * Enumeration of CSI data bus widths.
  */
 enum {
-	IPU_CSI_DATA_WIDTH_4,
-	IPU_CSI_DATA_WIDTH_8,
-	IPU_CSI_DATA_WIDTH_10,
-	IPU_CSI_DATA_WIDTH_16,
+	IPU_CSI_DATA_WIDTH_4 = 0,
+	IPU_CSI_DATA_WIDTH_8 = 1,
+	IPU_CSI_DATA_WIDTH_10 = 3,
+	IPU_CSI_DATA_WIDTH_16 = 9,
 };
 
 /*!
@@ -587,6 +587,7 @@ struct ipu_soc;
 struct ipu_soc *ipu_get_soc(int id);
 int32_t ipu_init_channel(struct ipu_soc *ipu, ipu_channel_t channel, ipu_channel_params_t *params);
 void ipu_uninit_channel(struct ipu_soc *ipu, ipu_channel_t channel);
+void ipu_disable_hsp_clk(struct ipu_soc *ipu);
 
 static inline bool ipu_can_rotate_in_place(ipu_rotate_mode_t rot)
 {
@@ -640,7 +641,7 @@ int32_t ipu_disable_csi(struct ipu_soc *ipu, uint32_t csi);
 int ipu_lowpwr_display_enable(void);
 int ipu_lowpwr_display_disable(void);
 
-void ipu_enable_irq(struct ipu_soc *ipu, uint32_t irq);
+int ipu_enable_irq(struct ipu_soc *ipu, uint32_t irq);
 void ipu_disable_irq(struct ipu_soc *ipu, uint32_t irq);
 void ipu_clear_irq(struct ipu_soc *ipu, uint32_t irq);
 int ipu_request_irq(struct ipu_soc *ipu, uint32_t irq,
@@ -737,6 +738,13 @@ struct ipuv3_fb_platform_data {
 	/* reserved mem */
 	resource_size_t 		res_base[2];
 	resource_size_t 		res_size[2];
+
+	/*
+	 * Late init to avoid display channel being
+	 * re-initialized as we've probably setup the
+	 * channel in bootloader.
+	 */
+	bool                            late_init;
 };
 
 struct imx_ipuv3_platform_data {
@@ -745,6 +753,13 @@ struct imx_ipuv3_platform_data {
 	void (*pg) (int);
 
 	char *csi_clk[2];
+
+	/*
+	 * Bypass reset to avoid display channel being
+	 * stopped by probe since it may starts to work
+	 * in bootloader.
+	 */
+	bool bypass_reset;
 };
 
 #endif /* __MACH_IPU_V3_H_ */

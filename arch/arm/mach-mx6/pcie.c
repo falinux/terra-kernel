@@ -3,7 +3,7 @@
  *
  * PCIe host controller driver for IMX6 SOCs
  *
- * Copyright (C) 2012 Freescale Semiconductor, Inc. All Rights Reserved.
+ * Copyright (C) 2012-2013 Freescale Semiconductor, Inc. All Rights Reserved.
  *
  * Bits taken from arch/arm/mach-dove/pcie.c
  *
@@ -29,13 +29,19 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/gpio.h>
+#include <linux/slab.h>
 #include <linux/platform_device.h>
+#include <linux/time.h>
 
 #include <mach/pcie.h>
 
 #include <asm/sizes.h>
+#include <asm/signal.h>
 
 #include "crm_regs.h"
+#ifdef CONFIG_PCI_MSI
+#include "msi.h"
+#endif
 
 /* Register Definitions */
 #define PRT_LOG_R_BaseAddress 0x700
@@ -65,29 +71,6 @@
 #define ATU_REGION_LIMIT_ADDR_R (ATU_R_BaseAddress + 0x14)
 #define ATU_REGION_LOW_TRGT_ADDR_R (ATU_R_BaseAddress + 0x18)
 #define ATU_REGION_UP_TRGT_ADDR_R (ATU_R_BaseAddress + 0x1C)
-
-/* GPR1: iomuxc_gpr1_pcie_ref_clk_en(iomuxc_gpr1[16]) */
-#define iomuxc_gpr1_pcie_ref_clk_en		(1 << 16)
-/* GPR1: iomuxc_gpr1_test_powerdown(iomuxc_gpr1_18) */
-#define iomuxc_gpr1_test_powerdown		(1 << 18)
-
-/* GPR12: iomuxc_gpr12_los_level(iomuxc_gpr12[8:4]) */
-#define iomuxc_gpr12_los_level			(0x1F << 4)
-/* GPR12: iomuxc_gpr12_app_ltssm_enable(iomuxc_gpr12[10]) */
-#define iomuxc_gpr12_app_ltssm_enable		(1 << 10)
-/* GPR12: iomuxc_gpr12_device_type(iomuxc_gpr12[15:12]) */
-#define iomuxc_gpr12_device_type		(0xF << 12)
-
-/* GPR8: iomuxc_gpr8_tx_deemph_gen1(iomuxc_gpr8[5:0]) */
-#define iomuxc_gpr8_tx_deemph_gen1		(0x3F << 0)
-/* GPR8: iomuxc_gpr8_tx_deemph_gen2_3p5db(iomuxc_gpr8[11:6]) */
-#define iomuxc_gpr8_tx_deemph_gen2_3p5db	(0x3F << 6)
-/* GPR8: iomuxc_gpr8_tx_deemph_gen2_6db(iomuxc_gpr8[17:12]) */
-#define iomuxc_gpr8_tx_deemph_gen2_6db		(0x3F << 12)
-/* GPR8: iomuxc_gpr8_tx_swing_full(iomuxc_gpr8[24:18]) */
-#define iomuxc_gpr8_tx_swing_full		(0x7F << 18)
-/* GPR8: iomuxc_gpr8_tx_swing_low(iomuxc_gpr8[31:25]) */
-#define iomuxc_gpr8_tx_swing_low		(0x7F << 25)
 
 /* Registers of PHY */
 /* Register PHY_STS_R */
@@ -158,6 +141,18 @@
 #define LNK_CAP_RegisterResetValue 0x011cc12
 #define LNK_CAP_RegisterResetMask 0xffffffff
 
+#ifdef CONFIG_PCI_MSI
+#define PCIE_RC_MSI_CAP   0x50
+
+#define PCIE_PL_MSICA    0x820
+#define PCIE_PL_MSICUA    0x824
+#define PCIE_PL_MSIC_INT  0x828
+
+#define MSIC_INT_EN  0x0
+#define MSIC_INT_MASK  0x4
+#define MSIC_INT_STATUS  0x8
+#endif
+
 /* End of Register Definitions */
 
 #define PCIE_DBI_BASE_ADDR	(PCIE_ARB_END_ADDR - SZ_16K + 1)
@@ -167,6 +162,21 @@
 #define  PCIE_CONF_FUNC(f)		(((f) & 0x7) << 8)
 #define  PCIE_CONF_REG(r)		((r) & ~0x3)
 
+/*
+ * The default values of the RC's reserved ddr memory
+ * used to verify EP mode.
+ * BTW, here is the layout of the 1G ddr on SD boards
+ * 0x1000_0000 ~ 0x4FFF_FFFF
+ */
+static u32 rc_ddr_test_region = 0x40000000;
+static u32 rc_ddr_test_region_size = (SZ_16M - SZ_16K);
+
+#ifdef EP_SELF_IO_TEST
+static void *rc_ddr_test_reg1, *rc_ddr_test_reg2;
+static void __iomem *pcie_arb_base_addr;
+static struct timeval tv1, tv2, tv3;
+static u32 tv_count1, tv_count2;
+#endif
 static void __iomem *base;
 static void __iomem *dbi_base;
 
@@ -235,7 +245,7 @@ static int __init imx_pcie_setup(int nr, struct pci_sys_data *sys)
 	pp->io_space_name[sizeof(pp->io_space_name) - 1] = 0;
 	pp->res[0].name = pp->io_space_name;
 	if (pp->index == 0) {
-		pp->res[0].start = PCIE_ARB_BASE_ADDR;
+		pp->res[0].start = PCIE_ARB_BASE_ADDR + SZ_16M - SZ_2M;
 		pp->res[0].end = pp->res[0].start + SZ_1M - 1;
 	}
 	pp->res[0].flags = IORESOURCE_IO;
@@ -251,7 +261,7 @@ static int __init imx_pcie_setup(int nr, struct pci_sys_data *sys)
 	pp->mem_space_name[sizeof(pp->mem_space_name) - 1] = 0;
 	pp->res[1].name = pp->mem_space_name;
 	if (pp->index == 0) {
-		pp->res[1].start = PCIE_ARB_BASE_ADDR + SZ_1M;
+		pp->res[1].start = PCIE_ARB_BASE_ADDR;
 		pp->res[1].end = pp->res[1].start + SZ_16M - SZ_2M - 1;
 	}
 	pp->res[1].flags = IORESOURCE_MEM;
@@ -299,7 +309,7 @@ static int imx_pcie_link_up(void __iomem *dbi_base)
 					0x0000);
 		}
 
-		if ((iterations < 0))
+		if (iterations == 0)
 			pr_info("link up failed, DB_R0:0x%08x, DB_R1:0x%08x!\n"
 					, readl(dbi_base + DB_R0)
 					, readl(dbi_base + DB_R1));
@@ -310,8 +320,14 @@ static int imx_pcie_link_up(void __iomem *dbi_base)
 	return 1;
 }
 
-static void imx_pcie_regions_setup(void __iomem *dbi_base)
+static void imx_pcie_regions_setup(struct device *dev, void __iomem *dbi_base)
 {
+	struct imx_pcie_platform_data *pdata = dev->platform_data;
+#ifdef CONFIG_PCI_MSI
+	unsigned int i;
+	void __iomem *p = dbi_base + PCIE_PL_MSIC_INT;
+#endif
+
 	/*
 	 * i.MX6 defines 16MB in the AXI address map for PCIe.
 	 *
@@ -319,9 +335,13 @@ static void imx_pcie_regions_setup(void __iomem *dbi_base)
 	 * split and defined into different regions by iATU,
 	 * with sizes and offsets as follows:
 	 *
-	 * 0x0100_0000 --- 0x010F_FFFF 1MB IORESOURCE_IO
-	 * 0x0110_0000 --- 0x01EF_FFFF 14MB IORESOURCE_MEM
-	 * 0x01F0_0000 --- 0x01FF_FFFF 1MB Cfg + Registers
+	 * RC:
+	 * 0x0100_0000 --- 0x01DF_FFFF 14MB IORESOURCE_MEM
+	 * 0x01E0_0000 --- 0x01EF_FFFF 1MB IORESOURCE_IO
+	 * 0x01F0_0000 --- 0x01FF_FFFF 1MB Cfg + MSI + Registers
+	 *
+	 * EP (default value):
+	 * 0x0100_0000 --- 0x01FF_C000 16MB - 16KB IORESOURCE_MEM
 	 */
 
 	/* CMD reg:I/O space, MEM space, and Bus Master Enable */
@@ -331,24 +351,155 @@ static void imx_pcie_regions_setup(void __iomem *dbi_base)
 			| PCI_COMMAND_MASTER,
 			dbi_base + PCI_COMMAND);
 
-	/* Set the CLASS_REV of RC CFG header to PCI_CLASS_BRIDGE_PCI */
-	writel(readl(dbi_base + PCI_CLASS_REVISION)
-			| (PCI_CLASS_BRIDGE_PCI << 16),
-			dbi_base + PCI_CLASS_REVISION);
+	if (pdata->type_ep) {
+		/*
+		 * configure the class_rev(emaluate one memory ram ep device),
+		 * bar0 and bar1 of ep
+		 */
+		writel(0xdeadbeaf, dbi_base + PCI_VENDOR_ID);
+		writel(readl(dbi_base + PCI_CLASS_REVISION)
+				| (PCI_CLASS_MEMORY_RAM	<< 16),
+				dbi_base + PCI_CLASS_REVISION);
+		writel(0xdeadbeaf, dbi_base + PCI_SUBSYSTEM_VENDOR_ID);
 
-	/*
-	 * region0 outbound used to access target cfg
-	 */
-	writel(0, dbi_base + ATU_VIEWPORT_R);
-	writel(PCIE_ARB_END_ADDR - SZ_1M + 1, dbi_base + ATU_REGION_LOWBASE_R);
-	writel(PCIE_ARB_END_ADDR, dbi_base + ATU_REGION_LIMIT_ADDR_R);
-	writel(0, dbi_base + ATU_REGION_UPBASE_R);
+		/* 32bit none-prefetchable 8M bytes memory on bar0 */
+		writel(0x0, dbi_base + PCI_BASE_ADDRESS_0);
+		writel(SZ_8M - 1, dbi_base + (1 << 12) + PCI_BASE_ADDRESS_0);
 
-	writel(0, dbi_base + ATU_REGION_LOW_TRGT_ADDR_R);
-	writel(0, dbi_base + ATU_REGION_UP_TRGT_ADDR_R);
-	writel(CfgRdWr0, dbi_base + ATU_REGION_CTRL1_R);
-	writel((1<<31), dbi_base + ATU_REGION_CTRL2_R);
+		/* None used bar1 */
+		writel(0x0, dbi_base + PCI_BASE_ADDRESS_1);
+		writel(0, dbi_base + (1 << 12) + PCI_BASE_ADDRESS_1);
+
+		/* 4K bytes IO on bar2 */
+		writel(0x1, dbi_base + PCI_BASE_ADDRESS_2);
+		writel(SZ_4K - 1, dbi_base + (1 << 12) + PCI_BASE_ADDRESS_2);
+
+		/*
+		 * 32bit prefetchable 1M bytes memory on bar3
+		 * FIXME BAR MASK3 is not changable, the size
+		 * is fixed to 256 bytes.
+		 */
+		writel(0x8, dbi_base + PCI_BASE_ADDRESS_3);
+		writel(SZ_1M - 1, dbi_base + (1 << 12) + PCI_BASE_ADDRESS_3);
+
+		/*
+		 * 64bit prefetchable 1M bytes memory on bar4-5.
+		 * FIXME BAR4,5 are not enabled yet
+		 */
+		writel(0xc, dbi_base + PCI_BASE_ADDRESS_4);
+		writel(SZ_1M - 1, dbi_base + (1 << 12) + PCI_BASE_ADDRESS_4);
+		writel(0, dbi_base + (1 << 12) + PCI_BASE_ADDRESS_5);
+
+		/*
+		 * region0 outbound used to access RC's reserved ddr memory
+		 */
+		writel(0, dbi_base + ATU_VIEWPORT_R);
+		writel(PCIE_ARB_BASE_ADDR, dbi_base + ATU_REGION_LOWBASE_R);
+		writel(0, dbi_base + ATU_REGION_UPBASE_R);
+		writel(PCIE_ARB_BASE_ADDR + rc_ddr_test_region_size,
+				dbi_base + ATU_REGION_LIMIT_ADDR_R);
+
+		writel(rc_ddr_test_region,
+				dbi_base + ATU_REGION_LOW_TRGT_ADDR_R);
+		writel(0, dbi_base + ATU_REGION_UP_TRGT_ADDR_R);
+		writel(MemRdWr, dbi_base + ATU_REGION_CTRL1_R);
+		writel((1<<31), dbi_base + ATU_REGION_CTRL2_R);
+	} else {
+		/* Set the CLASS_REV of RC CFG header to PCI_CLASS_BRIDGE_PCI */
+		writel(readl(dbi_base + PCI_CLASS_REVISION)
+				| (PCI_CLASS_BRIDGE_PCI << 16),
+				dbi_base + PCI_CLASS_REVISION);
+
+		/*
+		 * region0 outbound used to access target cfg
+		 */
+		writel(0, dbi_base + ATU_VIEWPORT_R);
+		writel(PCIE_ARB_END_ADDR - SZ_1M + 1,
+				dbi_base + ATU_REGION_LOWBASE_R);
+		writel(PCIE_ARB_END_ADDR - SZ_64K,
+				dbi_base + ATU_REGION_LIMIT_ADDR_R);
+		writel(0, dbi_base + ATU_REGION_UPBASE_R);
+
+		writel(0, dbi_base + ATU_REGION_LOW_TRGT_ADDR_R);
+		writel(0, dbi_base + ATU_REGION_UP_TRGT_ADDR_R);
+		writel(CfgRdWr0, dbi_base + ATU_REGION_CTRL1_R);
+		writel((1<<31), dbi_base + ATU_REGION_CTRL2_R);
+	}
+
+#ifdef CONFIG_PCI_MSI
+	writel(MSI_MATCH_ADDR, dbi_base + PCIE_PL_MSICA);
+	writel(0, dbi_base + PCIE_PL_MSICUA);
+	for (i = 0; i < 8 ; i++) {
+		writel(0, p + MSIC_INT_EN);
+		writel(0xFFFFFFFF, p + MSIC_INT_MASK);
+		writel(0xFFFFFFFF, p + MSIC_INT_STATUS);
+		p += 12;
+	}
+#endif
 }
+
+#ifdef CONFIG_PCI_MSI
+void imx_pcie_mask_irq(unsigned int pos, int set)
+{
+	unsigned int mask = 1 << (pos & 0x1F);
+	unsigned int val, newval;
+	void __iomem *p;
+
+	p = dbi_base + PCIE_PL_MSIC_INT + MSIC_INT_MASK + ((pos >> 5) * 12);
+
+	if (pos >= (8 * 32))
+		return;
+	val = readl(p);
+	if (set)
+		newval = val | mask;
+	else
+		newval = val & ~mask;
+	if (val != newval)
+		writel(newval, p);
+}
+
+void imx_pcie_enable_irq(unsigned int pos, int set)
+{
+	unsigned int mask = 1 << (pos & 0x1F);
+	unsigned int val, newval;
+	void __iomem *p;
+
+	p = dbi_base + PCIE_PL_MSIC_INT + MSIC_INT_EN + ((pos >> 5) * 12);
+
+	/* RC: MSI CAP enable */
+	if (set) {
+		val = readl(dbi_base + PCIE_RC_MSI_CAP);
+		val |= (PCI_MSI_FLAGS_ENABLE << 16);
+		writel(val, dbi_base + PCIE_RC_MSI_CAP);
+	}
+
+	if (pos >= (8 * 32))
+		return;
+	val = readl(p);
+	if (set)
+		newval = val | mask;
+	else
+		newval = val & ~mask;
+	if (val != newval)
+		writel(newval, p);
+	if (set && (val != newval))
+		imx_pcie_mask_irq(pos, 0);  /* unmask when enabled */
+	}
+
+unsigned int imx_pcie_msi_pending(unsigned int index)
+{
+	unsigned int val, mask;
+	void __iomem *p = dbi_base + PCIE_PL_MSIC_INT + (index * 12);
+
+	if (index >= 8)
+		return 0;
+	val = readl(p + MSIC_INT_STATUS);
+	mask = readl(p + MSIC_INT_MASK);
+	val &= ~mask;
+	writel(val, p + MSIC_INT_STATUS);
+	return val;
+}
+#endif
 
 static int imx_pcie_rd_conf(struct pci_bus *bus, u32 devfn, int where,
 			int size, u32 *val)
@@ -356,18 +507,31 @@ static int imx_pcie_rd_conf(struct pci_bus *bus, u32 devfn, int where,
 	struct imx_pcie_port *pp = bus_to_port(bus->number);
 	u32 va_address;
 
+	/*  Added to change transaction TYPE  */
+	if (bus->number < 2) {
+		writel(0, dbi_base + ATU_VIEWPORT_R);
+		writel(CfgRdWr0, dbi_base + ATU_REGION_CTRL1_R);
+	} else {
+		writel(0, dbi_base + ATU_VIEWPORT_R);
+		writel(CfgRdWr1, dbi_base + ATU_REGION_CTRL1_R);
+	}
+
 	if (pp) {
 		if (devfn != 0) {
-			*val = 0xffffffff;
+			*val = 0xFFFFFFFF;
 			return PCIBIOS_DEVICE_NOT_FOUND;
 		}
 
 		va_address = (u32)dbi_base + (where & ~0x3);
-	} else
-		va_address = (u32)base + (PCIE_CONF_BUS(bus->number - 1) +
-					  PCIE_CONF_DEV(PCI_SLOT(devfn)) +
-					  PCIE_CONF_FUNC(PCI_FUNC(devfn)) +
-					  PCIE_CONF_REG(where));
+	} else {
+		writel(0, dbi_base + ATU_VIEWPORT_R);
+
+		writel((((PCIE_CONF_BUS(bus->number)
+				+ PCIE_CONF_DEV(PCI_SLOT(devfn))
+				+ PCIE_CONF_FUNC(PCI_FUNC(devfn)))) << 8),
+				dbi_base + ATU_REGION_LOW_TRGT_ADDR_R);
+		va_address = (u32)base + PCIE_CONF_REG(where);
+	}
 
 	*val = readl(va_address);
 
@@ -386,16 +550,29 @@ static int imx_pcie_wr_conf(struct pci_bus *bus, u32 devfn,
 	u32 va_address = 0, mask = 0, tmp = 0;
 	int ret = PCIBIOS_SUCCESSFUL;
 
+	/*  Added to change transaction TYPE  */
+	if (bus->number < 2) {
+		writel(0, dbi_base + ATU_VIEWPORT_R);
+		writel(CfgRdWr0, dbi_base + ATU_REGION_CTRL1_R);
+	} else {
+		writel(0, dbi_base + ATU_VIEWPORT_R);
+		writel(CfgRdWr1, dbi_base + ATU_REGION_CTRL1_R);
+	}
+
 	if (pp) {
 		if (devfn != 0)
 			return PCIBIOS_DEVICE_NOT_FOUND;
 
 		va_address = (u32)dbi_base + (where & ~0x3);
-	} else
-		va_address = (u32)base + (PCIE_CONF_BUS(bus->number - 1) +
-					  PCIE_CONF_DEV(PCI_SLOT(devfn)) +
-					  PCIE_CONF_FUNC(PCI_FUNC(devfn)) +
-					  PCIE_CONF_REG(where));
+	} else {
+		writel(0, dbi_base + ATU_VIEWPORT_R);
+
+		writel((((PCIE_CONF_BUS(bus->number)
+				+ PCIE_CONF_DEV(PCI_SLOT(devfn))
+				+ PCIE_CONF_FUNC(PCI_FUNC(devfn)))) << 8),
+				dbi_base + ATU_REGION_LOW_TRGT_ADDR_R);
+		va_address = (u32)base + PCIE_CONF_REG(where);
+	}
 
 	if (size == 4) {
 		writel(val, va_address);
@@ -413,7 +590,6 @@ static int imx_pcie_wr_conf(struct pci_bus *bus, u32 devfn,
 	tmp |= val << ((where & 0x3) * 8);
 	writel(tmp, va_address);
 exit:
-
 	return ret;
 }
 
@@ -439,7 +615,13 @@ imx_pcie_scan_bus(int nr, struct pci_sys_data *sys)
 
 static int __init imx_pcie_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	return MXC_INT_PCIE_3;
+       switch (pin) {
+       case 1: return MXC_INT_PCIE_3;
+       case 2: return MXC_INT_PCIE_2;
+       case 3: return MXC_INT_PCIE_1;
+       case 4: return MXC_INT_PCIE_0;
+       default: return -1;
+       }
 }
 
 static struct hw_pci imx_pci __initdata = {
@@ -512,7 +694,7 @@ static int pcie_phy_cr_read(int addr , int *data)
 
 	/* after got ack return data */
 	temp_rd_data = readl(dbi_base + PHY_STS_R);
-	*data = (temp_rd_data & (0xffff << PCIE_CR_STAT_DATA_LOC)) ;
+	*data = (temp_rd_data & (0xFFFF << PCIE_CR_STAT_DATA_LOC)) ;
 
 	/* deassert rd signal */
 	temp_wr_data = 0x0;
@@ -595,18 +777,30 @@ static void imx_pcie_enable_controller(struct device *dev)
 	/* activate PCIE_PWR_EN */
 	gpio_direction_output(pdata->pcie_pwr_en, 1);
 
-	imx_pcie_clrset(iomuxc_gpr1_test_powerdown, 0 << 18, IOMUXC_GPR1);
+	imx_pcie_clrset(IOMUXC_GPR1_TEST_POWERDOWN, 0 << 18, IOMUXC_GPR1);
+
 
 	/* enable the clks */
-	pcie_clk = clk_get(NULL, "pcie_clk");
-	if (IS_ERR(pcie_clk))
-		pr_err("no pcie clock.\n");
+	if (pdata->type_ep) {
+		pcie_clk = clk_get(NULL, "pcie_ep_clk");
+		if (IS_ERR(pcie_clk))
+			pr_err("no pcie_ep clock.\n");
 
-	if (clk_enable(pcie_clk)) {
-		pr_err("can't enable pcie clock.\n");
-		clk_put(pcie_clk);
+		if (clk_enable(pcie_clk)) {
+			pr_err("can't enable pcie_ep clock.\n");
+			clk_put(pcie_clk);
+		}
+	} else {
+		pcie_clk = clk_get(NULL, "pcie_clk");
+		if (IS_ERR(pcie_clk))
+			pr_err("no pcie clock.\n");
+
+		if (clk_enable(pcie_clk)) {
+			pr_err("can't enable pcie clock.\n");
+			clk_put(pcie_clk);
+		}
 	}
-	imx_pcie_clrset(iomuxc_gpr1_pcie_ref_clk_en, 1 << 16, IOMUXC_GPR1);
+	imx_pcie_clrset(IOMUXC_GPR1_PCIE_REF_CLK_EN, 1 << 16, IOMUXC_GPR1);
 }
 
 static void card_reset(struct device *dev)
@@ -644,8 +838,8 @@ static void __init add_pcie_port(void __iomem *base, void __iomem *dbi_base,
 		memset(pp->res, 0, sizeof(pp->res));
 	} else {
 		pr_info("IMX PCIe port: link down!\n");
-		/* Release the clocks, and disable the power */
 
+		/* Release the clocks, and disable the power */
 		pcie_clk = clk_get(NULL, "pcie_clk");
 		if (IS_ERR(pcie_clk))
 			pr_err("no pcie clock.\n");
@@ -653,7 +847,7 @@ static void __init add_pcie_port(void __iomem *base, void __iomem *dbi_base,
 		clk_disable(pcie_clk);
 		clk_put(pcie_clk);
 
-		imx_pcie_clrset(iomuxc_gpr1_pcie_ref_clk_en, 0 << 16,
+		imx_pcie_clrset(IOMUXC_GPR1_PCIE_REF_CLK_EN, 0 << 16,
 				IOMUXC_GPR1);
 
 		/* Disable PCIE power */
@@ -662,16 +856,111 @@ static void __init add_pcie_port(void __iomem *base, void __iomem *dbi_base,
 		/* activate PCIE_PWR_EN */
 		gpio_direction_output(pdata->pcie_pwr_en, 0);
 
-		imx_pcie_clrset(iomuxc_gpr1_test_powerdown, 1 << 18,
+		imx_pcie_clrset(IOMUXC_GPR1_TEST_POWERDOWN, 1 << 18,
 				IOMUXC_GPR1);
 	}
 }
 
+/*  Added for PCI abort handling */
+static int imx6q_pcie_abort_handler(unsigned long addr,
+		unsigned int fsr, struct pt_regs *regs)
+{
+	/*
+	 * If it was an imprecise abort, then we need to correct the
+	 * return address to be _after_ the instruction.
+	 */
+	if (fsr & (1 << 10))
+		regs->ARM_pc += 4;
+	return 0;
+}
+
+#ifdef CONFIG_IMX_PCIE_EP_MODE_IN_EP_RC_SYS
+static ssize_t imx_pcie_rc_memw_info(struct device *dev,
+		struct device_attribute *devattr, char *buf)
+{
+	return sprintf(buf, "imx-pcie-rc-memw-info start 0x%08x, size 0x%08x\n",
+			rc_ddr_test_region, rc_ddr_test_region_size);
+}
+
+static ssize_t
+imx_pcie_rc_memw_start(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	u32 memw_start;
+
+	sscanf(buf, "%x\n", &memw_start);
+
+	if (memw_start < 0x10000000) {
+		dev_err(dev, "Invalid memory start address.\n");
+		dev_info(dev, "For example: echo 0x41000000 > /sys/...");
+		return -1;
+	}
+
+	if (rc_ddr_test_region != memw_start) {
+		rc_ddr_test_region = memw_start;
+		/* Re-setup the iATU */
+		imx_pcie_regions_setup(dev, dbi_base);
+	}
+
+	return count;
+}
+
+static ssize_t
+imx_pcie_rc_memw_size(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t count)
+{
+	u32 memw_size;
+
+	sscanf(buf, "%x\n", &memw_size);
+
+	if ((memw_size > (SZ_16M - SZ_16K)) || (memw_size < SZ_64K)) {
+		dev_err(dev, "Invalid, should be [SZ_64K,SZ_16M - SZ_16KB].\n");
+		dev_info(dev, "For example: echo 0x800000 > /sys/...");
+		return -1;
+	}
+
+	if (rc_ddr_test_region_size != memw_size) {
+		rc_ddr_test_region_size = memw_size;
+		/* Re-setup the iATU */
+		imx_pcie_regions_setup(dev, dbi_base);
+	}
+
+	return count;
+}
+
+static DEVICE_ATTR(rc_memw_info, S_IRUGO, imx_pcie_rc_memw_info, NULL);
+static DEVICE_ATTR(rc_memw_start_set, S_IWUGO, NULL, imx_pcie_rc_memw_start);
+static DEVICE_ATTR(rc_memw_size_set, S_IWUGO, NULL, imx_pcie_rc_memw_size);
+
+static struct attribute *imx_pcie_attrs[] = {
+	/*
+	 * The start address, and the limitation (64KB ~ (16MB - 16KB))
+	 * of the ddr mem window reserved by RC, and used for EP to access.
+	 * BTW, these attrs are only configured at EP side.
+	 */
+	&dev_attr_rc_memw_info.attr,
+	&dev_attr_rc_memw_start_set.attr,
+	&dev_attr_rc_memw_size_set.attr,
+	NULL
+};
+
+static struct attribute_group imx_pcie_attrgroup = {
+	.attrs	= imx_pcie_attrs,
+};
+#endif
+
 static int __devinit imx_pcie_pltfm_probe(struct platform_device *pdev)
 {
+#ifdef EP_SELF_IO_TEST
+	int i;
+#endif
+	int ret = 0;
 	struct resource *mem;
 	struct device *dev = &pdev->dev;
 	struct imx_pcie_platform_data *pdata = dev->platform_data;
+
+	pr_info("iMX6 PCIe %s mode %s entering.\n",
+			pdata->type_ep ? "PCIe EP" : "PCIe RC", __func__);
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!mem) {
@@ -679,86 +968,166 @@ static int __devinit imx_pcie_pltfm_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
+#ifdef CONFIG_IMX_PCIE_EP_MODE_IN_EP_RC_SYS
+	/* add attributes for device */
+	ret = sysfs_create_group(&pdev->dev.kobj, &imx_pcie_attrgroup);
+	if (ret)
+		return -EINVAL;
+#endif
+
+	/*  Added for PCI abort handling */
+	hook_fault_code(16 + 6, imx6q_pcie_abort_handler, SIGBUS, 0,
+			"imprecise external abort");
+
 	base = ioremap_nocache(PCIE_ARB_END_ADDR - SZ_1M + 1, SZ_1M - SZ_16K);
 	if (!base) {
 		pr_err("error with ioremap in function %s\n", __func__);
-		return -EIO;
+		ret = PTR_ERR(base);
+#ifdef CONFIG_IMX_PCIE_EP_MODE_IN_EP_RC_SYS
+		sysfs_remove_group(&pdev->dev.kobj, &imx_pcie_attrgroup);
+#endif
+		return ret;
 	}
 
 	dbi_base = devm_ioremap(dev, mem->start, resource_size(mem));
 	if (!dbi_base) {
 		dev_err(dev, "can't map %pR\n", mem);
-		return -ENOMEM;
+		ret = PTR_ERR(dbi_base);
+		goto err_base;
 	}
 
 	/* FIXME the field name should be aligned to RM */
-	imx_pcie_clrset(iomuxc_gpr12_app_ltssm_enable, 0 << 10, IOMUXC_GPR12);
+	imx_pcie_clrset(IOMUXC_GPR12_APP_LTSSM_ENABLE, 0 << 10, IOMUXC_GPR12);
 
 	/* configure constant input signal to the pcie ctrl and phy */
-	imx_pcie_clrset(iomuxc_gpr12_device_type, PCI_EXP_TYPE_ROOT_PORT << 12,
-			IOMUXC_GPR12);
-	imx_pcie_clrset(iomuxc_gpr12_los_level, 9 << 4, IOMUXC_GPR12);
+	if (pdata->type_ep & 1)
+		/* EP */
+		imx_pcie_clrset(IOMUXC_GPR12_DEVICE_TYPE,
+				PCI_EXP_TYPE_ENDPOINT	<< 12, IOMUXC_GPR12);
+	else
+		/* RC */
+		imx_pcie_clrset(IOMUXC_GPR12_DEVICE_TYPE,
+				PCI_EXP_TYPE_ROOT_PORT << 12, IOMUXC_GPR12);
+	imx_pcie_clrset(IOMUXC_GPR12_LOS_LEVEL, 9 << 4, IOMUXC_GPR12);
 
-	imx_pcie_clrset(iomuxc_gpr8_tx_deemph_gen1, 0 << 0, IOMUXC_GPR8);
-	imx_pcie_clrset(iomuxc_gpr8_tx_deemph_gen2_3p5db, 0 << 6, IOMUXC_GPR8);
-	imx_pcie_clrset(iomuxc_gpr8_tx_deemph_gen2_6db, 20 << 12, IOMUXC_GPR8);
-	imx_pcie_clrset(iomuxc_gpr8_tx_swing_full, 127 << 18, IOMUXC_GPR8);
-	imx_pcie_clrset(iomuxc_gpr8_tx_swing_low, 127 << 25, IOMUXC_GPR8);
+	imx_pcie_clrset(IOMUXC_GPR8_TX_DEEMPH_GEN1, 0 << 0, IOMUXC_GPR8);
+	imx_pcie_clrset(IOMUXC_GPR8_TX_DEEMPH_GEN2_3P5DB, 0 << 6, IOMUXC_GPR8);
+	imx_pcie_clrset(IOMUXC_GPR8_TX_DEEMPH_GEN2_6DB, 20 << 12, IOMUXC_GPR8);
+	imx_pcie_clrset(IOMUXC_GPR8_TX_SWING_FULL, 127 << 18, IOMUXC_GPR8);
+	imx_pcie_clrset(IOMUXC_GPR8_TX_SWING_LOW, 127 << 25, IOMUXC_GPR8);
 
 	/* Enable the pwr, clks and so on */
 	imx_pcie_enable_controller(dev);
+	if (!(pdata->type_ep)) {
+		/*Only RC: togle the external card's reset */
+		card_reset(dev) ;
 
-	/* togle the external card's reset */
-	card_reset(dev) ;
-
-	usleep_range(3000, 4000);
-	imx_pcie_regions_setup(dbi_base);
-	usleep_range(3000, 4000);
-
-	/* start link up */
-	imx_pcie_clrset(iomuxc_gpr12_app_ltssm_enable, 1 << 10, IOMUXC_GPR12);
-
-	/* add the pcie port */
-	add_pcie_port(base, dbi_base, pdata);
-
-
-	pci_common_init(&imx_pci);
-	return 0;
-}
-
-static int __devexit imx_pcie_pltfm_remove(struct platform_device *pdev)
-{
-	struct clk *pcie_clk;
-	struct device *dev = &pdev->dev;
-	struct imx_pcie_platform_data *pdata = dev->platform_data;
-	struct resource *iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-
-	/* Release clocks, and disable power  */
-	pcie_clk = clk_get(NULL, "pcie_clk");
-	if (IS_ERR(pcie_clk))
-		pr_err("no pcie clock.\n");
-
-	if (pcie_clk) {
-		clk_disable(pcie_clk);
-		clk_put(pcie_clk);
+		imx_pcie_regions_setup(dev, dbi_base);
 	}
 
-	imx_pcie_clrset(iomuxc_gpr1_pcie_ref_clk_en, 0 << 16, IOMUXC_GPR1);
+	pr_info("PCIE: %s start link up.\n", __func__);
+	/* start link up */
+	imx_pcie_clrset(IOMUXC_GPR12_APP_LTSSM_ENABLE, 1 << 10, IOMUXC_GPR12);
 
-	/* Disable PCIE power */
-	gpio_request(pdata->pcie_pwr_en, "PCIE POWER_EN");
+	if (pdata->type_ep) {
+#ifdef EP_SELF_IO_TEST
+		/* Prepare the test regions and data */
+		rc_ddr_test_reg1 = kzalloc(rc_ddr_test_region_size, GFP_KERNEL);
+		if (!rc_ddr_test_reg1)
+			pr_err("PCIe EP: can't alloc the test region1.\n");
 
-	/* activate PCIE_PWR_EN */
-	gpio_direction_output(pdata->pcie_pwr_en, 0);
+		rc_ddr_test_reg2 = kzalloc(rc_ddr_test_region_size, GFP_KERNEL);
+		if (!rc_ddr_test_reg2) {
+			kfree(rc_ddr_test_reg1);
+			pr_err("PCIe EP: can't alloc the test region2.\n");
+		}
 
-	imx_pcie_clrset(iomuxc_gpr1_test_powerdown, 1 << 18, IOMUXC_GPR1);
+		pcie_arb_base_addr = ioremap_cached(PCIE_ARB_BASE_ADDR,
+				rc_ddr_test_region_size);
 
-	iounmap(base);
-	iounmap(dbi_base);
-	release_mem_region(iomem->start, resource_size(iomem));
-	platform_set_drvdata(pdev, NULL);
+		if (!pcie_arb_base_addr) {
+			pr_err("error with ioremap in function %s\n", __func__);
+			ret = PTR_ERR(pcie_arb_base_addr);
+			kfree(rc_ddr_test_reg2);
+			kfree(rc_ddr_test_reg1);
+			goto err_base;
+		}
 
+		for (i = 0; i < rc_ddr_test_region_size; i = i + 4) {
+			writel(0xE6600D00 + i, rc_ddr_test_reg1 + i);
+			writel(0xDEADBEAF, rc_ddr_test_reg2 + i);
+		}
+#endif
+
+		pr_info("PCIe EP: waiting for link up...\n");
+		/* link is debug bit 36 debug 1 start in bit 32 */
+		do {
+			usleep_range(10, 20);
+		} while ((readl(dbi_base + DB_R1) & 0x10) == 0);
+		/* Make sure that the PCIe link is up */
+		if (imx_pcie_link_up(dbi_base)) {
+			pr_info("PCIe EP: link up.\n");
+		} else {
+			pr_info("PCIe EP: ERROR link is down, exit!\n");
+#ifdef EP_SELF_IO_TEST
+			kfree(rc_ddr_test_reg2);
+			kfree(rc_ddr_test_reg1);
+			iounmap(pcie_arb_base_addr);
+#endif
+			goto err_link_down;
+		}
+
+		imx_pcie_regions_setup(dev, dbi_base);
+#ifdef EP_SELF_IO_TEST
+		/* PCIe EP start the data transfer after link up */
+		pr_info("PCIe EP: Starting data transfer...\n");
+		do_gettimeofday(&tv1);
+
+		memcpy((unsigned long *)pcie_arb_base_addr,
+				(unsigned long *)rc_ddr_test_reg1, 0xFFC000);
+
+		do_gettimeofday(&tv2);
+
+		memcpy((unsigned long *)rc_ddr_test_reg2,
+				(unsigned long *)pcie_arb_base_addr, 0xFFC000);
+
+		do_gettimeofday(&tv3);
+
+		if (memcmp(rc_ddr_test_reg2, rc_ddr_test_reg1, 0xFFC000) != 0) {
+			pr_info("PCIe EP: Data transfer is failed.\n");
+		} else {
+			tv_count1 = (tv2.tv_sec - tv1.tv_sec) * USEC_PER_SEC
+				+ tv2.tv_usec - tv1.tv_usec;
+			tv_count2 = (tv3.tv_sec - tv2.tv_sec) * USEC_PER_SEC
+				+ tv3.tv_usec - tv2.tv_usec;
+
+			pr_info("PCIe EP: Data transfer is successful."
+					"tv_count1 %dus, tv_count2 %dus.\n",
+					tv_count1, tv_count2);
+			pr_info("PCIe EP: Data write speed is %ldMB/s.\n",
+					((((0xFFC000/1024) * MSEC_PER_SEC)))
+					/(tv_count1));
+			pr_info("PCIe EP: Data read speed is %ldMB/s.\n",
+					((((0xFFC000/1024) * MSEC_PER_SEC)))
+					/(tv_count2));
+		}
+#endif
+
+	} else {
+		/* add the pcie port */
+		add_pcie_port(base, dbi_base, pdata);
+
+		pci_common_init(&imx_pci);
+	}
 	return 0;
+
+err_link_down:
+	iounmap(dbi_base);
+
+err_base:
+	iounmap(base);
+
+	return ret;
 }
 
 static struct platform_driver imx_pcie_pltfm_driver = {
@@ -767,7 +1136,6 @@ static struct platform_driver imx_pcie_pltfm_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= imx_pcie_pltfm_probe,
-	.remove		= __devexit_p(imx_pcie_pltfm_remove),
 };
 
 /*****************************************************************************\

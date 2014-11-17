@@ -170,6 +170,14 @@ config PRISM54
 
 	  When built as module you get the module prism54
 
+config IMX6_MMC_AW_NH387L
+    bool "support AW_NH387L with MMC on IMX6"
+    depends on MMC && ARCH_MX6Q 
+    select WIRELESS_EXT
+    select WEXT_PRIV
+    select WEXT_SPY
+    ---help---
+
 config USB_ZD1201
 	tristate "USB ZD1201 based Wireless device support"
 	depends on USB
@@ -271,6 +279,7 @@ config MWL8K
 source "drivers/net/wireless/ath/Kconfig"
 source "drivers/net/wireless/b43/Kconfig"
 source "drivers/net/wireless/b43legacy/Kconfig"
+source "drivers/net/wireless/brcm80211/Kconfig"
 source "drivers/net/wireless/hostap/Kconfig"
 source "drivers/net/wireless/ipw2x00/Kconfig"
 source "drivers/net/wireless/iwlwifi/Kconfig"
